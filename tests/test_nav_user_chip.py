@@ -46,9 +46,12 @@ import chrome
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 # The freeze baseline for `product.py` and `quotation.py`. Re-anchored from
-# `eff0034` in October 2026: `910b3a6` is the white-label commit at which both
-# files reached their product state (see the docstring of the freeze test).
-FREEZE_BASE = "910b3a6"
+# `eff0034` in October 2026, then on 27 November 2026 from `910b3a6` to
+# `161ab55`, this repository's ROOT commit (PROVENANCE.md). `910b3a6` lived in
+# the pre-snapshot history, which a clone of this repository does not carry, so
+# the test below skipped itself on every fresh checkout. Both files are
+# byte-identical at the two commits, so the freeze claims exactly what it did.
+FREEZE_BASE = "161ab55"
 
 
 # ── The tie between PINNED_PAGES and the goldens ───────────────────────────
