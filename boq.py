@@ -76,6 +76,7 @@ from flask import Blueprint, redirect, request, url_for
 import branding as B
 import cascade
 import pipeline as P
+import pricesummary as PS   # the price-summary cover and the terms library (27 Nov 2026)
 import series as SER   # the document-number FLOOR and the one scan per series (25 Sep 2026)
 from address import INDIAN_STATES, picker_options, picker_payload
 from chrome import BASE_STYLES, _nav
@@ -2262,30 +2263,7 @@ def _document_html(boq: dict, show_rate_breakup: bool = False) -> str:
 <div class="quotation-doc boq-doc">
 
   <table class="page-frame">
-    <thead><tr><td>
-      <div class="lh">
-        <div>
-          <div class="lh-name">{B.name_html("lh-name-accent")}</div>
-          {B.tagline_html()}
-          {f'<div class="lh-legal">{P.esc(B.COMPANY_LEGAL)}</div>' if B.COMPANY_LEGAL else ''}
-        </div>
-        {B.logo_mark(56)}
-      </div>
-      <div class="lh-rule"></div>
-      <div class="lh-addr">Registered Address: {B.field(B.COMPANY_ADDR, "registered address")}</div>
-      <div class="lh-contact">
-        Phone: {B.field(B.COMPANY_PHONE, "phone")}<span class="sep">|</span>
-        Email: {B.field(B.COMPANY_EMAIL, "e-mail")}
-        {f'<span class="sep">|</span>Web: {P.esc(B.COMPANY_WEB)}' if B.COMPANY_WEB else ''}
-      </div>
-    </td></tr></thead>
-
-    <tfoot><tr><td>
-      <div class="lh-foot">
-        {P.esc(B.COMPANY_LEGAL) if B.COMPANY_LEGAL else B.name_text()} &middot; BOQ {P.esc(boq.get('ref'))}
-        &middot; basic value, taxes extra
-      </div>
-    </td></tr></tfoot>
+{_frame_head(boq)}
 
     <tbody><tr><td>
 
@@ -2324,6 +2302,85 @@ def _document_html(boq: dict, show_rate_breakup: bool = False) -> str:
         duration of the project unless varied in writing.
       </div>
 
+    </td></tr></tbody>
+  </table>
+
+</div>
+</div>"""
+
+
+def _frame_head(boq: dict) -> str:
+    """
+    The page frame's repeating letterhead (`<thead>`) and foot (`<tfoot>`).
+
+    One copy, shared by the schedule (`_document_html`) and the price-summary
+    cover (`_cover_html`), so the cover can never carry a different letterhead
+    from the pages behind it. Extracted 27 November 2026; the schedule's
+    rendered bytes did not move.
+    """
+    return f"""    <thead><tr><td>
+      <div class="lh">
+        <div>
+          <div class="lh-name">{B.name_html("lh-name-accent")}</div>
+          {B.tagline_html()}
+          {f'<div class="lh-legal">{P.esc(B.COMPANY_LEGAL)}</div>' if B.COMPANY_LEGAL else ''}
+        </div>
+        {B.logo_mark(56)}
+      </div>
+      <div class="lh-rule"></div>
+      <div class="lh-addr">Registered Address: {B.field(B.COMPANY_ADDR, "registered address")}</div>
+      <div class="lh-contact">
+        Phone: {B.field(B.COMPANY_PHONE, "phone")}<span class="sep">|</span>
+        Email: {B.field(B.COMPANY_EMAIL, "e-mail")}
+        {f'<span class="sep">|</span>Web: {P.esc(B.COMPANY_WEB)}' if B.COMPANY_WEB else ''}
+      </div>
+    </td></tr></thead>
+
+    <tfoot><tr><td>
+      <div class="lh-foot">
+        {P.esc(B.COMPANY_LEGAL) if B.COMPANY_LEGAL else B.name_text()} &middot; BOQ {P.esc(boq.get('ref'))}
+        &middot; basic value, taxes extra
+      </div>
+    </td></tr></tfoot>"""
+
+
+def _cover_html(boq: dict) -> str:
+    """
+    The PRICE SUMMARY cover (`pricesummary.py`): one row per section, the
+    chain's own section totals, the grand total in words, and the BOQ's OWN
+    terms. Printed before the schedule when `price_summary_on` is ticked.
+    Every figure comes from `section_totals()` / `boq_totals()` — the cover
+    computes nothing the schedule does not.
+    """
+    rows = []
+    for s in _sections_of(boq):
+        sup, ins = section_totals(boq, s.get("code"))
+        rows.append((s.get("code") or "", s.get("title") or "",
+                     [_inr(sup), _inr(ins), _inr(sup + ins)]))
+    sup, ins, total = boq_totals(boq)
+    to_first = ((boq.get("to") or "").strip().split("\n") or [""])[0]
+    meta_html = (
+        '<div class="doc-header">'
+        '<div class="dh-cell"><span class="dh-lbl">To</span>'
+        f'<div class="dh-body"><span class="dh-name">{P.esc(to_first)}</span></div></div>'
+        f'<div class="dh-cell">{_meta("Project", P.esc(boq.get("project_name")))}'
+        f'{_meta("Site", P.esc(boq.get("site_location")))}</div>'
+        f'<div class="dh-cell">{_meta("BOQ No.", P.esc(boq.get("ref")))}'
+        f'{_meta("Date", P.esc(boq.get("date")))}</div>'
+        '</div>')
+    body = PS.summary_html(
+        meta_html=meta_html, heads=("Supply", "Installation", "Total"),
+        rows=rows, total_cells=[_inr(sup), _inr(ins), _inr(total)],
+        words=_amount_in_words(total), terms=PS.terms_of(boq))
+    return f"""
+<div class="doc-outer boq-outer ps-cover">
+<div class="quotation-doc boq-doc">
+
+  <table class="page-frame">
+{_frame_head(boq)}
+
+    <tbody><tr><td>
+{body}
     </td></tr></tbody>
   </table>
 
@@ -2633,6 +2690,7 @@ def view_boq(id: str):
     <a href="{url_for('boq.create_boq')}" class="btn btn-ghost">+ New</a>
     {revise_btn}
     {ra_btns}{del_btn}
+    <a href="{url_for('boq.summary_boq', id=id)}" class="btn btn-ghost">Price summary &amp; terms</a>
     <a href="{url_for('boq.print_boq', id=id)}" class="btn">&#128438;&nbsp;Print</a>
   </div>
 </div>
@@ -2673,13 +2731,21 @@ def print_boq(id: str):
     if not boq:
         return redirect(url_for("boq.list_boqs", msg="BOQ not found.", type="error"))
 
+    # The price-summary cover and the page orientation (27 November 2026,
+    # `pricesummary.py`). Both are EMPTY strings for a BOQ that never ticked
+    # the cover and keeps the landscape page, so such a BOQ prints byte for
+    # byte as it did before the cover existed.
+    cover_on  = PS.is_on(boq)
+    cover     = _cover_html(boq) if cover_on else ""
+    cover_css = (PS.SUMMARY_CSS if cover_on else "") + PS.orientation_css(boq)
+
     template = f"""<!DOCTYPE html><html lang="en">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(str(boq.get('ref') or '') + " BOQ")}</title>
   {B.HEAD_ICON}
-  {BASE_STYLES}{VIEW_DOC_STYLES}{QUOTATION_STYLES}{P.PIPELINE_STYLES}{BOQ_STYLES}{BOQ_DOC_STYLES}
+  {BASE_STYLES}{VIEW_DOC_STYLES}{QUOTATION_STYLES}{P.PIPELINE_STYLES}{BOQ_STYLES}{BOQ_DOC_STYLES}{cover_css}
   <style>
     @media print {{ .no-print {{ display:none !important; }} }}
   </style>
@@ -2698,11 +2764,106 @@ def print_boq(id: str):
     <button class="btn" onclick="window.print()">&#128438;&nbsp;Print</button>
   </div>
 </div>
-
+{cover}
 {_document_html(boq, show_rate_breakup=False)}
 
 </main></body></html>"""
     return _page(template)
+
+
+@boq_bp.route("/summary/<id>", methods=["GET", "POST"])
+def summary_boq(id: str):
+    """
+    The BOQ's PRICE SUMMARY cover and its terms (27 November 2026,
+    `pricesummary.py`): tick the cover on, pick Portrait or Landscape, and
+    choose the terms — from the library (`/settings/terms`) or typed here,
+    optionally saved back to the library.
+
+    Print-only fields: nothing here touches a line, a rate, a quantity or a
+    total, which is why it is allowed on a BOQ that already has bills under
+    it (a revision is how the schedule itself changes). The terms are COPIED
+    onto the BOQ — the snapshot rule in `pricesummary.py`'s docstring.
+    """
+    boq = STORE["boqs"].get(id)
+    if not boq:
+        return redirect(url_for("boq.list_boqs", msg="BOQ not found.", type="error"))
+
+    error = ""
+    if request.method == "POST":
+        fields, own, error = PS.fields_from_form(request.form)
+        if not error:
+            boq.update(fields)
+            added = 0
+            if own and request.form.get("save_own"):
+                added = PS.add_to_library(own, request.form.get("own_category") or "")
+            note = f" {added} new term{'' if added == 1 else 's'} saved to the library." if added else ""
+            return redirect(url_for("boq.view_boq", id=id, type="success",
+                                    msg=f"Price summary saved for {boq.get('ref')}.{note}"))
+
+    lib = PS.library()
+    current = PS.terms_of(boq)
+    # A BOQ whose terms were never chosen starts from the library's defaults.
+    chosen = set(current) if PS.FIELD_TERMS in boq else set(PS.default_terms())
+    lib_texts = {e["text"] for e in lib}
+    own_text = "\n".join(t for t in current if t not in lib_texts)
+    if request.method == "POST":
+        chosen = {e["text"] for e in lib if e["id"] in set(request.form.getlist("lib_pick"))}
+        own_text = request.form.get("own_terms") or ""
+
+    lib_rows = "".join(
+        f'<label class="ps-lib-row"><input type="checkbox" name="lib_pick" value="{P.esc(e["id"])}"'
+        f'{" checked" if e["text"] in chosen else ""}/> '
+        f'<span class="ps-cat">{P.esc(e["category"])}</span> {P.esc(e["text"])}</label>'
+        for e in lib) or ('<p class="muted">The library is empty. Type this BOQ&rsquo;s terms '
+                          'below, tick &ldquo;also save&rdquo;, and they are there for the next one.</p>')
+    on_now = PS.is_on(boq) if request.method == "GET" else bool(request.form.get(PS.FIELD_ON))
+    orient = PS.orientation_of(boq) if request.method == "GET" else request.form.get(PS.FIELD_ORIENT)
+    orient_opts = "".join(
+        f'<label style="margin-right:1rem;"><input type="radio" name="{PS.FIELD_ORIENT}" value="{o}"'
+        f'{" checked" if o == orient else ""}/> {o.title()}</label>' for o in PS.ORIENTATIONS)
+    cat_opts = "".join(f'<option value="{c}">{c}</option>' for c in PS.CATEGORIES)
+    alert = f'<div class="alert alert-error">{P.esc(error)}</div>' if error else ""
+
+    return _page(f"""<!DOCTYPE html><html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>{B.page_title("Price summary " + str(boq.get('ref') or ''))}</title>
+  {B.HEAD_ICON}
+  {BASE_STYLES}{QUOTATION_STYLES}{P.PIPELINE_STYLES}{BOQ_STYLES}
+  <style>
+    .ps-form {{ max-width:860px; }}
+    .ps-lib-row {{ display:block; padding:.35rem 0; border-bottom:1px solid var(--border); }}
+    .ps-cat {{ display:inline-block; min-width:6.5rem; font-size:.78rem; color:var(--muted); }}
+    .ps-form textarea {{ width:100%; min-height:7rem; }}
+  </style>
+</head>
+<body>
+{_nav()}
+<main>
+  <div class="page-top">
+    <h1>Price summary &amp; terms &mdash; <span style="color:var(--brand);">{P.esc(boq.get('ref'))}</span></h1>
+  </div>
+  {alert}
+  <form method="POST" action="{url_for('boq.summary_boq', id=id)}" class="ps-form card">
+    <p><label><input type="checkbox" name="{PS.FIELD_ON}" value="1"{" checked" if on_now else ""}/>
+       <b>Print a one-page price summary before the schedule</b></label><br/>
+       <span class="muted">One row per section with its supply, installation and total, the grand
+       total in words, and the terms below.</span></p>
+    <p><b>Page</b><br/>{orient_opts}</p>
+    <h3>Terms from the library</h3>
+    {lib_rows}
+    <p class="muted"><a href="{url_for('settings.terms_library')}">Edit the terms library</a></p>
+    <h3>Add your own (one per line)</h3>
+    <textarea name="own_terms">{P.esc(own_text)}</textarea>
+    <p><label><input type="checkbox" name="save_own" value="1"/> Also save these to the library as</label>
+       <select name="own_category">{cat_opts}</select></p>
+    <div style="display:flex;gap:.7rem;">
+      <button type="submit" class="btn">Save</button>
+      <a href="{url_for('boq.view_boq', id=id)}" class="btn btn-ghost">Cancel</a>
+    </div>
+  </form>
+</main></body></html>""")
 
 
 # =============================================================================
@@ -5213,6 +5374,10 @@ def create_boq(imported: dict = None):
                 "company_branch":  (form.get("company_branch") or "").strip(),
                 "auth_signatory":  (form.get("auth_signatory") or "").strip(),
             }
+            # A revision keeps the document it revises' price-summary cover,
+            # its terms and its orientation (`pricesummary.carry_fields`).
+            if prev:
+                boq.update(PS.carry_fields(prev))
             sup, ins, tot = boq_totals(boq)
             boq["supply_subtotal"]  = sup
             boq["install_subtotal"] = ins

@@ -349,6 +349,12 @@ UNLINKED_ON_PURPOSE = {
     # and `tests/test_gst_lookup.py` asserts the form carries its URL.
     "address.gst_captcha_add": "not a page: the CAPTCHA image the address form's "
                                "script fetches",
+    # ── The terms library, 27 November 2026 ─────────────────────────────────
+    #
+    # A sub-page of Settings, reached from every BOQ's "Price summary & terms"
+    # page (`/boq/summary/<id>`), where the terms are used. A link on the
+    # settings form itself would move that page's golden for a convenience.
+    "settings.terms_library": "reached from each BOQ's Price summary & terms page",
 }
 
 

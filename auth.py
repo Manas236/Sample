@@ -729,6 +729,7 @@ ROUTE_PERMISSIONS = {
     "auth.edit_role":             "admin.roles",
     "auth.access_log":            "admin.access_log",
     "settings.edit_settings":     "settings.edit",
+    "settings.terms_library":     "settings.edit",
 
     # ── General ──────────────────────────────────────────────────────────────
     "dashboard.index":            "dashboard.view",
@@ -744,6 +745,7 @@ ROUTE_PERMISSIONS = {
     # POST destroys the lot through `cascade.delete_cascade()`.
     "boq.delete_boq":             "boq.delete",
     "boq.print_boq":              "boq.print",
+    "boq.summary_boq":            "boq.create",
     # Import BOQ from Excel (29 Sep 2026) — the SAME permission as
     # `boq.create_boq`, on all three, and no new permission minted: every one
     # of them ends at the Create BOQ form, and whoever may fill that form in by

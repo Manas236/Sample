@@ -1984,6 +1984,43 @@ equivalence over every status value rather than leaving it to a comment.
   creator guard and the one-rung rule, which is what keeps "Everything" from
   meaning "alone".
 
+
+### 2l. `pricesummary.py` — the price-summary cover and the terms library (27 November 2026)
+
+Ported from the client line as a reimplementation (FEATURE_GAP.md rows 1a, 1b).
+**A leaf**: it imports `store` and `pipeline` only, because `boq.py` prints the
+cover and may not import `settings.py`, which edits the library — the reason
+`series.py` exists. `tests/test_import_directions.py` holds it.
+
+- **The cover.** `/boq/print/<id>` opens with a one-page PRICE SUMMARY when the
+  BOQ's `price_summary_on` is set: one row per section from
+  `boq.section_totals()`, the grand total and its words from `boq_totals()`,
+  the library's tax line, and the BOQ's own numbered terms. The letterhead is
+  `boq._frame_head()`, the one copy the schedule also uses (extracted in this
+  pass; the schedule's bytes did not move). The cover computes nothing.
+- **Orientation.** `print_orientation`: absent or `"landscape"` is the BOQ's
+  existing landscape page; `"portrait"` adds `pricesummary.PORTRAIT_CSS`, a
+  later `@page` rule, and the portrait column widths already in
+  `BOQ_DOC_STYLES` take over.
+- **Off by default, byte for byte.** A BOQ that never ticked the cover carries
+  none of the three fields and prints exactly as before (no cover markup, no
+  cover CSS). A revision inherits the three fields (`carry_fields()`).
+- **The library** is `STORE["settings"]["price_summary"]` =
+  `{title, tax_line, library: [{id, text, category, on}]}`, edited at
+  **`/settings/terms`** (`settings.terms_library`, permission `settings.edit`).
+  **Nothing is seeded** and the product ships no terms: the client line's
+  defaults were its customer's own text and stayed behind.
+- **The per-BOQ editor** is **`/boq/summary/<id>`** (`boq.summary_boq`,
+  permission `boq.create`), linked from `/boq/view`. Library entries are ticked
+  (starting from those marked Default), and own terms typed one per line can be
+  saved back to the library. The chosen texts are COPIED onto the BOQ as
+  `summary_terms` — the snapshot rule: editing the library changes no BOQ
+  already saved.
+- **Not on the quotation.** The client line also put the cover on the printed
+  quotation, which needs a further unfreeze of `quotation.py`. This product's
+  freeze (INTRODUCTION.md §7) was kept, so the quotation prints as before
+  (FEATURE_GAP.md row 1c).
+
 ---
 
 ## 3. Data model

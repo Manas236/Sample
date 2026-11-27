@@ -1387,3 +1387,95 @@ def edit_settings():
       <footer><p>{B.name_text()} · {B.APP_SUBTITLE} · company settings</p></footer>
     </main></body></html>"""
     return _page(template)
+
+
+# =============================================================================
+# THE TERMS LIBRARY — /settings/terms (27 November 2026, `pricesummary.py`)
+# =============================================================================
+#
+# Its own page, not a section of the form above: the settings form is one POST
+# that validates and saves every section at once, and a library of up to 300
+# rows does not belong in it. The record lives in `pricesummary.py`, because
+# `boq.py` (which prints the terms) may not import this module.
+
+@settings_bp.route("/terms", methods=["GET", "POST"])
+def terms_library():
+    import pricesummary as PS
+
+    if request.method == "POST":
+        ids   = request.form.getlist("lib_id")
+        texts = request.form.getlist("lib_text")
+        cats  = request.form.getlist("lib_cat")
+        on    = set(request.form.getlist("lib_on"))
+        drop  = set(request.form.getlist("lib_del"))
+        entries = [{"id": i, "text": t, "category": c, "on": i in on}
+                   for i, t, c in zip(ids, texts, cats) if i not in drop]
+        new_cat = request.form.get("new_category") or ""
+        new_on  = bool(request.form.get("new_on"))
+        entries += [{"text": t, "category": new_cat, "on": new_on}
+                    for t in (request.form.get("new_terms") or "").splitlines() if t.strip()]
+        PS.save_library(request.form.get("title", ""), request.form.get("tax_line", ""), entries)
+        return redirect(url_for("settings.terms_library", msg="Terms library saved.",
+                                type="success"))
+
+    rec = STORE["settings"].get(PS.RECORD) or {}
+    cat_opts = lambda cur: "".join(
+        f'<option value="{c}"{" selected" if c == cur else ""}>{c}</option>'
+        for c in PS.CATEGORIES)
+    rows = "".join(f"""
+      <tr>
+        <td><input type="hidden" name="lib_id" value="{P.esc(e['id'])}"/>
+            <input type="text" name="lib_text" value="{P.esc(e['text'])}" maxlength="{PS.MAX_TERM_CHARS}"/></td>
+        <td><select name="lib_cat">{cat_opts(e['category'])}</select></td>
+        <td style="text-align:center;"><input type="checkbox" name="lib_on" value="{P.esc(e['id'])}"{" checked" if e['on'] else ""}/></td>
+        <td style="text-align:center;"><input type="checkbox" name="lib_del" value="{P.esc(e['id'])}"/></td>
+      </tr>""" for e in PS.library())
+    if not rows:
+        rows = '<tr><td colspan="4" class="muted">No terms yet &mdash; add the first ones below.</td></tr>'
+    msg = request.args.get("msg", "")
+    kind = "success" if request.args.get("type") == "success" else "error"
+    alert = f'<div class="alert alert-{kind}">{P.esc(msg)}</div>' if msg else ""
+
+    return _page(f"""<!DOCTYPE html><html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>{B.page_title("Terms library")}</title>
+  {B.HEAD_ICON}
+  {BASE_STYLES}{QUOTATION_STYLES}{SETTINGS_STYLES}
+  <style>
+    .tl-table {{ width:100%; border-collapse:collapse; }}
+    .tl-table th, .tl-table td {{ padding:.35rem .4rem; border-bottom:1px solid var(--border); }}
+    .tl-table input[type=text] {{ width:100%; }}
+    .tl-form textarea {{ width:100%; min-height:6rem; }}
+  </style>
+</head>
+<body>
+{_nav()}
+<main>
+  <div class="page-top"><h1>Terms &amp; conditions library</h1></div>
+  {alert}
+  <form method="POST" action="{url_for('settings.terms_library')}" class="card tl-form">
+    <p class="fld-hint">The terms a printed BOQ&rsquo;s price-summary cover can carry. Ticked
+      <b>Default</b> means a new BOQ starts with it chosen. A document keeps its own copy:
+      editing a term here changes no BOQ already printed.</p>
+    <div class="fg2">
+      <div><label>Cover title</label>
+        <input type="text" name="title" value="{P.esc(rec.get('title', ''))}" placeholder="{P.esc(PS.DEFAULT_TITLE)}" maxlength="{PS.MAX_TEXT_CHARS}"/></div>
+      <div><label>Tax line under the total</label>
+        <input type="text" name="tax_line" value="{P.esc(rec.get('tax_line', ''))}" placeholder="{P.esc(PS.DEFAULT_TAX_LINE)}" maxlength="{PS.MAX_TEXT_CHARS}"/></div>
+    </div>
+    <table class="tl-table">
+      <thead><tr><th>Term</th><th>Category</th><th>Default</th><th>Delete</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    <h3>Add terms (one per line)</h3>
+    <textarea name="new_terms"></textarea>
+    <p>Category <select name="new_category">{cat_opts(PS.FALLBACK_CATEGORY)}</select>
+       <label style="margin-left:1rem;"><input type="checkbox" name="new_on" value="1" checked/> Default</label></p>
+    <div class="set-actions">
+      <button type="submit" class="btn">Save library</button>
+      <a href="{url_for('settings.edit_settings')}" class="btn btn-ghost">Back to settings</a>
+    </div>
+  </form>
+</main></body></html>""")

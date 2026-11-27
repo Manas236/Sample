@@ -462,6 +462,7 @@ def populated(client):
             "/roles/edit/<id>":       "role-hr",
             "/boq/print/<id>":      bid,
             "/boq/view/<id>":       bid,
+            "/boq/summary/<id>":    bid,
             "/boq/import/<token>":      imp_token,
             "/boq/import/<token>/form": imp_token,
             # The four destructive confirmations minted 23 September 2026.

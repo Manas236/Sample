@@ -695,6 +695,21 @@ FORBIDDEN = [
                                      "db.py mirrors it"),
     ("series", "flask",       "any", "it owns no route and builds no HTML"),
 
+    # `pricesummary.py` (27 November 2026): the price-summary cover and the
+    # terms library. A leaf for `series.py`'s reason — `boq.py` prints it and
+    # may not import `settings.py`, which edits it — so it imports `store` and
+    # `pipeline` only.
+    ("pricesummary", 'boq'       , "any", 'boq.py prints the cover; the leaf only lays out rows it is handed'),
+    ("pricesummary", 'settings'  , "any", "settings.py owns the library's page and imports THIS module; importing back is a cycle, and boq.py may not reach settings.py"),
+    ("pricesummary", 'quotation' , "any", 'the frozen file'),
+    ("pricesummary", 'product'   , "any", 'the other frozen file'),
+    ("pricesummary", 'chrome'    , "any", 'it builds no page'),
+    ("pricesummary", 'dashboard' , "any", 'same'),
+    ("pricesummary", 'auth'      , "any", 'a term is not an access question'),
+    ("pricesummary", 'flask'     , "any", 'it owns no route'),
+    ("pricesummary", 'ra'        , "any", 'nothing downstream of the BOQ'),
+    ("pricesummary", 'invoice'   , "any", 'same'),
+
     # The other direction: the printed sheet may not depend on the shell.
     # `docsheet.py` reads `BASE_STYLES` through `dashboard.py`'s re-export,
     # deliberately, and says so at the import.
