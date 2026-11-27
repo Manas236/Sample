@@ -26,18 +26,18 @@ covers it).
 
 | # | Feature | Demo_Works commits / files | Size | Status |
 |---|---|---|---|---|
-| 1a | Price-summary cover page on the printed BOQ, Portrait / Landscape | `1e9bc9a` · `pricesummary.py`, `boq.py`, `settings.py` | M | see below |
-| 1b | Terms & conditions library (/settings), add from library or your own | `71ea78a` · `pricesummary.py`, `tools/backfill_terms.py` | M | see below |
-| 1c | Price-summary cover on the printed **quotation** | `1e9bc9a`, `71ea78a` · `quotation.py` | M | see below |
-| 2a | Draft PO displayed as "Product Inquiry" | `66759ef` · `po_draft.py`, `chrome.py`, `settings.py` | S | see below |
-| 2b | Product Inquiry without a BOQ, extra items, convert carries extras | `2e4f2c0` · `extraitems.py`, `po_draft.py`, `purchase.py` | M | see below |
-| 2c | Product Inquiry fully editable until converted | `b0e4809` · `po_draft.py` | M | see below |
-| 2d | Named reusable item pictures on the inquiry and the PO; pictures on the real PO at creation | `3eded00`, `af958a1` · `lineimage.py`, `boqpick.py`, `purchase.py`, `db.py` | L | see below |
-| 3a | Delivery challan without a BOQ; extra items on any DC | `887860f` · `challan.py` | M | see below |
-| 3b | Delivery challan raised from a purchase PO | `351eaf5` · `dcpo.py`, `challan.py`, `purchase.py` | M | see below |
-| 4a | Every document raised straight from the BOQ (RA types, PI, TI) | `fa42e27` · `boq.py`, `invoice.py`, `proforma.py` | L | see below |
-| 4b | Supply + Installation in one POST, merged tax invoice; set cancelled as one | `976010d`, `c33200c` · `raboth.py`, `ra.py`, `merged_ra.py` | L | see below |
-| 4c | RA / TI quantity above the BOQ, with a required reason | `ac887bc` · `boqexcess.py`, `ra.py`, `invoice.py` | M | see below |
+| 1a | Price-summary cover page on the printed BOQ, Portrait / Landscape | `1e9bc9a` · `pricesummary.py`, `boq.py`, `settings.py` | M | **ported** |
+| 1b | Terms & conditions library (/settings), add from library or your own | `71ea78a` · `pricesummary.py`, `tools/backfill_terms.py` | M | **ported** |
+| 1c | Price-summary cover on the printed **quotation** | `1e9bc9a`, `71ea78a` · `quotation.py` | M | **deferred** (quotation.py freeze) |
+| 2a | Draft PO displayed as "Product Inquiry" | `66759ef` · `po_draft.py`, `chrome.py`, `settings.py` | S | **ported** |
+| 2b | Product Inquiry without a BOQ, extra items, convert carries extras | `2e4f2c0` · `extraitems.py`, `po_draft.py`, `purchase.py` | M | **deferred** |
+| 2c | Product Inquiry fully editable until converted | `b0e4809` · `po_draft.py` | M | **deferred** |
+| 2d | Named reusable item pictures on the inquiry and the PO; pictures on the real PO at creation | `3eded00`, `af958a1` · `lineimage.py`, `boqpick.py`, `purchase.py`, `db.py` | L | **deferred** |
+| 3a | Delivery challan without a BOQ; extra items on any DC | `887860f` · `challan.py` | M | **deferred** |
+| 3b | Delivery challan raised from a purchase PO | `351eaf5` · `dcpo.py`, `challan.py`, `purchase.py` | M | **deferred** |
+| 4a | Every document raised straight from the BOQ (RA types, PI, TI) | `fa42e27` · `boq.py`, `invoice.py`, `proforma.py` | L | **deferred** |
+| 4b | Supply + Installation in one POST, merged tax invoice; set cancelled as one | `976010d`, `c33200c` · `raboth.py`, `ra.py`, `merged_ra.py` | L | **deferred** |
+| 4c | RA / TI quantity above the BOQ, with a required reason | `ac887bc` · `boqexcess.py`, `ra.py`, `invoice.py` | M | **ported** |
 | 5 | Receipts as a BOQ running account with TDS / retention / other deductions | — not at `e1ac14f` | — | **deferred: not on origin** (the work exists only on the live server and was never pushed to Demo_Works) |
 | 6 | Round-off to the rupee, a per-document tick, on by default | `09a028b`, `0cee4d4`, `d2e3234` · `roundoff.py` + every money module | M | see below |
 | 7 | Project page: documents follow their BOQ (latest revision only), labour cost, cost pie + progress bars, planned vs actual margin | `a6ab6c4`, `19dc55d`, `7f2fd07`, `7308d26`, `456c980`, `e793dfa`, `9edba90`, `4f1360f`, `2df435e` · `pnl.py`, `pnl_chart.py`, `projtag.py`, `projectview.py` | L | see below |
@@ -87,5 +87,60 @@ paragraph per row, so the reason travels with the verdict.
 
 ## Outcome, row by row
 
-_Filled in as each port lands; REPORT.md on `demo/solar-epc` carries the
-commit SHAs._
+REPORT.md on `demo/solar-epc` carries every commit SHA.
+
+**1a — ported.** The price-summary cover on the printed BOQ, Portrait or
+Landscape per BOQ (`pricesummary.py`, `/boq/summary/<id>`; ABOUT.md §2l).
+Reimplemented: the client line's default terms and its trade-specific title
+were its customer's own text and stayed behind; this product ships no terms.
+
+**1b — ported.** The terms library at `/settings/terms`: add from the library,
+add your own, optionally save your own back to it. Nothing is seeded.
+
+**1c — deferred: blocked by the product's own rule.** The cover on the printed
+*quotation* needs a further unfreeze of `quotation.py`. INTRODUCTION.md §7 and
+`tests/test_nav_user_chip.py` freeze that file, and the brief says Sample's
+rules win. In this product the BOQ is the priced offer for a project, so the
+demo shows the cover there.
+
+**2a — ported.** Display text only (ABOUT.md §2n): URLs, the collection,
+permission IDs and document numbers are unchanged.
+
+**2b — deferred (L here).** Sample's inquiry is bound to a BOQ in all four of
+its parts: the form (the `boqpick` grid), the record (`boq_id` required), the
+print and the conversion (`purchase.from_draft` copies BOQ lines). A standalone
+inquiry with extra items is a second line source in all four, plus the client
+line's `extraitems.py` mechanism, against a `purchase.py` that has diverged.
+The demo's "inquiry to two vendors, convert the winner" runs on the BOQ-bound
+inquiry, which Sample has.
+
+**2c — deferred (M).** Sample keeps its existing `/po/edit`; the client line's
+full-edit rewrite (500+ lines in `po_draft.py`) is not ported.
+
+**2d — deferred (L).** Named reusable pictures need a new collection, the
+picker, the inquiry, the PO form and its print.
+
+**3a — deferred (L here).** Sample's challan is BOQ-bound: dispatched
+quantities, the over-dispatch band and the RA-from-challans caps all key on
+BOQ `line_id`s, and a BOQ-less challan has to be kept out of every one of them.
+The demo's partial dispatches run on BOQ challans, which Sample has.
+
+**3b — deferred.** Depends on 3a's second line source.
+
+**4a — deferred (L).** RA bills are already raised from the BOQ in Sample —
+from ticked challans, from a measurement sheet, or by hand. What the client
+line added is the proforma and tax invoice raised from the BOQ (≈1,900 lines
+across `invoice.py` and `proforma.py`).
+
+**4b — deferred (L).** The one-POST Supply + Installation bill is a new module
+plus ≈400 lines of `ra.py`. Sample's merged RA (C3, `merged_ra.py`) already
+puts two separately raised legs on ONE tax invoice, which is the document the
+demo needs.
+
+**4c — ported.** Billing above the BOQ quantity with one required reason
+(`boqexcess.py`; ABOUT.md §2m). The measurement cap, a line not in the
+schedule and the challan cap stay hard.
+
+**5 — deferred: not on origin.** The work exists only on the live server and
+was never pushed to Demo_Works, so it is not at `e1ac14f`. Sample's receipts
+(amount + "allowed short") are what the demo uses.
