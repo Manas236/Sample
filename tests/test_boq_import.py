@@ -913,7 +913,8 @@ def test_every_import_route_carries_the_boq_create_permission():
     for ep in eps:
         assert auth.ROUTE_PERMISSIONS[ep] == auth.ROUTE_PERMISSIONS["boq.create_boq"] == "boq.create"
     doc = (REPO / "docs" / "ACCESS_MATRIX.md").read_text(encoding="utf8")
-    assert ("| `boq.create` | `boq.create_boq`, `boqimport.form`, "
+    # `boq.summary_boq` (the price-summary editor, 27 Nov 2026) shares the row.
+    assert ("| `boq.create` | `boq.create_boq`, `boq.summary_boq`, `boqimport.form`, "
             "`boqimport.preview`, `boqimport.upload` |") in doc
 
 
