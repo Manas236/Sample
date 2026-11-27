@@ -2021,6 +2021,32 @@ cover and may not import `settings.py`, which edits the library — the reason
   freeze (INTRODUCTION.md §7) was kept, so the quotation prints as before
   (FEATURE_GAP.md row 1c).
 
+
+### 2m. `boqexcess.py` — billing above the BOQ quantity, with a reason (27 November 2026)
+
+Ported from the client line as a reimplementation (FEATURE_GAP.md row 4c). A
+leaf (`store` + `pipeline`); `ra.py` imports it, it imports nothing upstream.
+
+- **What softened, and only that.** `ra._validate()` splits `overclaims()`'s
+  rows by reason. `"overclaim"` — the cumulative claim passing the **BOQ
+  quantity** — is a warning: the RA form re-renders with an amber per-line
+  table and ONE "Reason for billing above BOQ" box inside the form, and a blank
+  reason is refused. Every other reason (`"overmeasured"`, `"not_measured"`,
+  `"not_in_boq"`) and the challan cap (`dc_overclaims()`) stay **hard blocks**,
+  word for word. `overclaims()` itself — the detector, summing every bill on
+  the revision chain by `line_id` — is unchanged.
+- **The snapshot.** A bill saved above its BOQ quantity carries
+  `excess_lines` (`[{line_id, item_no, leg, boq_qty, previously, this,
+  cumulative_after, excess}]`) and `excess_reason`, written at save by
+  `boqexcess.stamp()` and never recomputed; nothing reads them back to decide
+  anything. A bill within its schedule carries **neither key**, so it and its
+  print are byte-identical to before. `/ra/edit` re-stamps (or clears) on save.
+- **Where it shows.** A screen-only (`no-print`) band on `/ra/view`. The
+  printed RA bill does not change.
+- Not ported: the client line also applied it to the tax invoice raised from a
+  BOQ and to the Supply + Installation one-POST bill — neither exists here
+  (FEATURE_GAP.md rows 4a, 4b).
+
 ---
 
 ## 3. Data model

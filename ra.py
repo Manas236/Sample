@@ -68,6 +68,7 @@ import branding as B
 import measurement as MS
 import pipeline as P
 import series as SER   # the document-number FLOOR and the one scan per series (25 Sep 2026)
+import boqexcess as BX  # billing above the BOQ quantity, with a reason — a leaf (27 Nov 2026)
 # "Is this challan billed, and by which bill?" — ONE predicate, in a leaf both
 # this module and `challan.py` import, because neither may import the other
 # (CLIENT_CHANGES.md §0, fortieth block, ruling C). See `dcbill.py`.
@@ -2980,7 +2981,8 @@ function total() {
   if (w) {
     w.style.display = over ? '' : 'none';
     w.textContent = over + (over === 1 ? ' line is' : ' lines are')
-                  + ' over the approved quantity and will be refused on save.';
+                  + ' over the approved quantity. Above the BOQ quantity is allowed'
+                  + ' with a reason; above a measured quantity is refused on save.';
   }
 }
 
@@ -3462,7 +3464,8 @@ def _posted(raw_lines: list) -> dict:
 
 
 def _validate(raw: str, boq: dict, leg: str, prev: dict,
-              exclude_ra_id: str = None, dc_caps: dict = None) -> tuple:
+              exclude_ra_id: str = None, dc_caps: dict = None,
+              excess_reason: str = None, excess_out: list = None) -> tuple:
     """
     (claims, error) — parse, clean and run the block. One path for create and edit.
 
@@ -3495,16 +3498,33 @@ def _validate(raw: str, boq: dict, leg: str, prev: dict,
                 msg += f" ({len(over) - 4} more not shown.)"
             return [], raw_lines, msg
 
-    # THE BLOCK. Cumulative across the whole revision chain, hard, and with no
-    # override anywhere in this file. The message carries the full arithmetic
-    # because "line 24.d is over" is not something anybody can act on.
+    # THE BLOCK. Cumulative across the whole revision chain. The message
+    # carries the full arithmetic because "line 24.d is over" is not something
+    # anybody can act on.
+    #
+    # ⚠ 27 November 2026 (`boqexcess.py`, FEATURE_GAP.md row 4c): the
+    #   BOQ-QUANTITY ceiling (reason "overclaim") is now a WARNING that needs
+    #   one reason for the bill. Every other reason — the measurement cap, a
+    #   line not measured, a line not in the schedule — stays the hard block,
+    #   word for word, and so does the challan cap above. `excess_out`, when
+    #   given, receives the above-BOQ rows so the caller can draw the amber box
+    #   and stamp the snapshot.
     breaches = overclaims(str(boq.get("id") or ""), leg, claims,
                           exclude_ra_id=exclude_ra_id)
-    if breaches:
+    hard = [v for v in breaches if v["reason"] != "overclaim"]
+    soft = [v for v in breaches if v["reason"] == "overclaim"]
+    if excess_out is not None:
+        excess_out[:] = soft
+    if hard:
         msg = " ".join(overclaim_message(v) for v in breaches[:4])
         if len(breaches) > 4:
             msg += f" ({len(breaches) - 4} more not shown.)"
         return [], raw_lines, msg
+    if soft and not str(excess_reason or "").strip():
+        msg = " ".join(overclaim_message(v) for v in soft[:4])
+        if len(soft) > 4:
+            msg += f" ({len(soft) - 4} more not shown.)"
+        return [], raw_lines, BX.refusal(soft) + " " + msg
 
     return claims, raw_lines, ""
 
@@ -4031,9 +4051,15 @@ def create_ra():
     if request.method == "POST":
         date_val = (request.form.get("date") or today).strip()
         notes_val = (request.form.get("notes") or "").strip()
+        excess_reason = BX.read_reason(request.form)
+        excess = []
         claims, raw_lines, error = _validate(
-            request.form.get("ra_json", ""), boq, leg, prev, dc_caps=dc_caps)
+            request.form.get("ra_json", ""), boq, leg, prev, dc_caps=dc_caps,
+            excess_reason=excess_reason, excess_out=excess)
         entered = _posted(raw_lines)
+        # The amber box goes INSIDE the form, through the hidden-field seam,
+        # so the reason posts with the claim. Empty when nothing is above BOQ.
+        hidden_html += BX.warning_html(excess, excess_reason)
         # RULING C — a POST naming a challan that may not be billed here is
         # refused, and the message names the bill that holds it.
         if dc_problems:
@@ -4173,6 +4199,9 @@ def create_ra():
                             f"manual RA bill.")
             elif sheets:
                 STORE["ra_bills"][rid][SOURCE_MS_KEY] = [mid for mid, _m in sheets]
+            # Above the BOQ quantity (boqexcess.py): the snapshot, only when
+            # there is one — a bill within its schedule carries no new key.
+            BX.stamp(STORE["ra_bills"][rid], excess, excess_reason)
             # B6 — the creator, captured at the write site. See approval.py.
             approval.stamp_creator(STORE["ra_bills"][rid])
             return redirect(url_for("ra.view_ra", id=rid,
@@ -4244,7 +4273,7 @@ def edit_ra(id: str):
     # the cap and the band names it as gone. `source_dc_ids` is NOT rewritten
     # here; it was written once, by `create_ra()`.
     dc_caps = None
-    tail_html = ""
+    tail_html = excess_box = ""
     src_ids = bill.get(DCB.SOURCE_KEY)
     if isinstance(src_ids, list):
         dcs = STORE.get("delivery_challans") or {}
@@ -4265,10 +4294,14 @@ def edit_ra(id: str):
     if request.method == "POST":
         date_val = (request.form.get("date") or date_val).strip()
         notes_val = (request.form.get("notes") or "").strip()
+        excess_reason = BX.read_reason(request.form) or str(bill.get(BX.REASON_KEY) or "")
+        excess = []
         claims, raw_lines, error = _validate(
             request.form.get("ra_json", ""), boq, leg, prev, exclude_ra_id=id,
-            dc_caps=dc_caps)
+            dc_caps=dc_caps, excess_reason=excess_reason, excess_out=excess)
         entered = _posted(raw_lines)
+        if error:
+            excess_box = BX.warning_html(excess, excess_reason)
 
         if not error:
             tax_invoice_ref = (request.form.get("tax_invoice_ref") or bill.get("tax_invoice_ref") or "").strip()
@@ -4283,6 +4316,7 @@ def edit_ra(id: str):
                                           tax_type=tax_type, cgst_rate=cgst_rate,
                                           sgst_rate=sgst_rate, igst_rate=igst_rate)
             bill["claims"] = claims
+            BX.stamp(bill, excess, excess_reason)
             bill["claim_subtotal"] = tax_info["claim_subtotal"]
             bill["deductions"] = tax_info["deductions"]
             bill["deduction_total"] = tax_info["deduction_total"]
@@ -4321,7 +4355,7 @@ def edit_ra(id: str):
         back_url=url_for("ra.view_ra", id=id),
         date_val=date_val, notes_val=notes_val,
         submit_label="Save changes",
-        source_html=source_html, tail_html=tail_html)
+        source_html=source_html, hidden_html=excess_box, tail_html=tail_html)
 
 
 @ra_bp.route("/view/<id>")
@@ -4518,7 +4552,7 @@ def view_ra(id: str):
   {lock_html}
   {rate_note}
   {drift_note}
-  {MS.pre_measurement_marker(bill)}{_source_band_html(bill)}
+  {MS.pre_measurement_marker(bill)}{_source_band_html(bill)}{BX.band_html(bill)}
   {approval.panel("ra", bill)}
   <div class="ra-meta">
     <div class="ra-fact"><b>Our reference</b><span>{_esc(bill.get('ref'))}</span></div>

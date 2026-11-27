@@ -710,6 +710,16 @@ FORBIDDEN = [
     ("pricesummary", 'ra'        , "any", 'nothing downstream of the BOQ'),
     ("pricesummary", 'invoice'   , "any", 'same'),
 
+    # `boqexcess.py` (27 November 2026): billing above the BOQ quantity with a
+    # reason. A leaf — `ra.py` stamps and draws it; it decides nothing.
+    ("boqexcess", 'ra'      , "any", 'ra.py imports THIS module; importing back is a cycle'),
+    ("boqexcess", 'boq'     , "any", 'it reads no schedule; the detector is ra.overclaims()'),
+    ("boqexcess", 'invoice' , "any", 'ra.py may never import invoice.py, so neither may its leaf'),
+    ("boqexcess", 'settings', "any", 'nothing to configure'),
+    ("boqexcess", 'chrome'  , "any", 'it builds no page'),
+    ("boqexcess", 'flask'   , "any", 'it owns no route'),
+    ("boqexcess", 'quotation', "any", 'the frozen file'),
+
     # The other direction: the printed sheet may not depend on the shell.
     # `docsheet.py` reads `BASE_STYLES` through `dashboard.py`'s re-export,
     # deliberately, and says so at the import.
