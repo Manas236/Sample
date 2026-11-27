@@ -139,3 +139,40 @@ def test_the_fictional_identity_lives_only_in_the_solar_seed():
         src = path.read_text(encoding="utf8")
         for s in strings:
             assert s not in src, f"{path.name} carries the solar demo identity {s!r}"
+
+
+def test_a_rebrand_in_settings_reaches_every_printed_document(built, client):
+    """DEMO_SCRIPT.md's "Rebrand before the demo", proved: change the identity
+    at /settings and every print route carries the new one and none of the old."""
+    import io
+    from werkzeug.datastructures import MultiDict
+    import demo_seed as DS
+    new = {"COMPANY_NAME": "PROSPECT SOLAR", "COMPANY_LEGAL": "Prospect Solar Pvt Ltd",
+           "COMPANY_ADDR": "Unit 9, Example Estate, Thane - 400601, Maharashtra",
+           "COMPANY_GSTIN": "27AAAAA0000A1Z2", "COMPANY_PAN": "AAAAA0000A",
+           "COMPANY_SIGNATORY": "Prospect Signatory", "BANK_NAME": "Prospect Demo Bank",
+           "BANK_ACCOUNT_NAME": "Prospect Solar Pvt Ltd", "BANK_IFSC": "PROS0000001"}
+    f = DS._Driver(client, STORE).form("/settings/", "COMPANY_NAME")
+    data = MultiDict()
+    for name, value in f["fields"]:
+        data.add(name, new.get(name, value))
+    png = SS.sun_png(64)
+    data.add("logo_file", (io.BytesIO(png), "prospect.png", "image/png"))
+    r = client.post("/settings/", data=data, content_type="multipart/form-data")
+    assert r.status_code == 302
+    urls = ([f"/boq/print/{i}" for i in STORE["boqs"]]
+            + [f"/ra/print/{i}" for i in STORE["ra_bills"]]
+            + [f"/dc/print/{i}" for i in STORE["delivery_challans"]]
+            + [f"/po/print/{i}" for i in STORE["purchase_orders"]]
+            + [f"/measurement/print/{i}" for i in STORE["measurements"]]
+            + [f"/quotation/view/{i}" for i in STORE["quotations"]]
+            + [f"/purchase/view/{i}" for i in STORE["purchases"]])
+    for u in urls:
+        html = client.get(u).get_data(as_text=True)
+        assert "Prospect Solar" in html or "PROSPECT SOLAR" in html, u
+        assert SS.COMPANY["COMPANY_LEGAL"] not in html, u
+        assert SS.COMPANY["COMPANY_GSTIN"] not in html, u
+    ra = client.get(f"/ra/print/{built['ra1']}").get_data(as_text=True)
+    for s in ("27AAAAA0000A1Z2", "Prospect Demo Bank", "PROS0000001", "Unit 9, Example Estate"):
+        assert s in ra, s
+    assert STORE["settings"]["logo"]["doc"] in ra, "the new logo is on the printed bill"
