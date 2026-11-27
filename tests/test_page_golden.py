@@ -304,16 +304,19 @@ PAGES = {
     # (name, url): (whole sha, byte length, {block: sha})
     # was 5e225e0820d80885 / 106453 before the white-label re-baseline (October 2026)
     # was c28868da67c436a6 / 89132 before the white-label re-baseline (October 2026)
-    ("dashboard",       "/"):                          ("5d517edd364bbfd7", 91306,
-        {"head": "66ab60e6c7d630f9", "shell": "8a27214eeb51b76a", "chrome": "f2b982e3982d9d3b", "main": "82b3880c22b85c17"}),
+    # was 5d517edd364bbfd7 / 91306 before the Product Inquiry rename (27 Nov 2026)
+    ("dashboard",       "/"):                          ("19c0765acc302822", 91294,
+        {"head": "66ab60e6c7d630f9", "shell": "8a27214eeb51b76a", "chrome": "67c2c78cac5f5a40", "main": "706c0cbfe6d45d5d"}),
     # was 36d5f6af2d97f948 / 70833 before the white-label re-baseline (October 2026)
     # was 9eb6958a0365c764 / 53522 before the white-label re-baseline (October 2026)
-    ("quotations",      "/quotation/"):                ("dc35355618422d26", 55665,
-        {"head": "ba7647ada7d5801c", "shell": "8a27214eeb51b76a", "chrome": "e2c8c7ed88925ef8", "main": "6c5e3eb84af95543"}),
+    # was dc35355618422d26 / 55665 before the Product Inquiry rename (27 Nov 2026)
+    ("quotations",      "/quotation/"):                ("c7fc7132c43ca554", 55657,
+        {"head": "ba7647ada7d5801c", "shell": "8a27214eeb51b76a", "chrome": "95d3611c7e85d079", "main": "6c5e3eb84af95543"}),
     # was 7d76c8fa785a4097 / 76141 before the white-label re-baseline (October 2026)
     # was 934eca3dbe9f2e42 / 58830 before the white-label re-baseline (October 2026)
-    ("proformas",       "/proforma/"):                 ("7cf3a3edcbb4eac4", 60973,
-        {"head": "26ad1b55097b7862", "shell": "8a27214eeb51b76a", "chrome": "ae6b2463a6924d12", "main": "8692744de5e2d1c7"}),
+    # was 7cf3a3edcbb4eac4 / 60973 before the Product Inquiry rename (27 Nov 2026)
+    ("proformas",       "/proforma/"):                 ("f7136e480e0294cb", 60965,
+        {"head": "26ad1b55097b7862", "shell": "8a27214eeb51b76a", "chrome": "8230f91a490d653b", "main": "8692744de5e2d1c7"}),
     # was 838b42d5894c49c6 / 83043 / head 28aee5e42e857421 before the
     # 23 Sep 2026 cancellation overprint. ⚠ `head` ALONE moved (+1,575 bytes of
     # `.lc-*` rules in INVOICE_STYLES, which every page in this module loads);
@@ -321,28 +324,34 @@ PAGES = {
     # did not change at all.
     # was 36c5d2c1be5c3e01 / 84618 before the white-label re-baseline (October 2026)
     # was cbc2956a3ced50e8 / 67307 before the white-label re-baseline (October 2026)
-    ("tax invoices",    "/invoice/"):                  ("e0cd06234792a4cb", 69450,
-        {"head": "49f622d77e9036ac", "shell": "8a27214eeb51b76a", "chrome": "fb608e19556b8d21", "main": "8911f51a4148d389"}),
+    # was e0cd06234792a4cb / 69450 before the Product Inquiry rename (27 Nov 2026)
+    ("tax invoices",    "/invoice/"):                  ("7c2f3afec6c24a7a", 69442,
+        {"head": "49f622d77e9036ac", "shell": "8a27214eeb51b76a", "chrome": "8c757811be8c3199", "main": "8911f51a4148d389"}),
     # was ddd6e71e5ba97679 / 80408 before the white-label re-baseline (October 2026)
     # was 10c1d46213b80396 / 63090 before the white-label re-baseline (October 2026)
-    ("purchase orders", "/purchase/"):                 ("d18362fda86a22b0", 65233,
-        {"head": "17d23c0c6391fa6e", "shell": "8a27214eeb51b76a", "chrome": "df7dc61e5d8f6526", "main": "770a13cce5f5e749"}),
+    # was d18362fda86a22b0 / 65233 before the Product Inquiry rename (27 Nov 2026)
+    ("purchase orders", "/purchase/"):                 ("e0e78b5599e8f9fb", 65225,
+        {"head": "17d23c0c6391fa6e", "shell": "8a27214eeb51b76a", "chrome": "82ec612cf90b8725", "main": "770a13cce5f5e749"}),
     # was f4df328387214170 / 98711 before the white-label re-baseline (October 2026)
     # was e8b824fc212c097f / 51773 before the white-label re-baseline (October 2026)
-    ("spec library",    "/spec/"):                     ("b59375433f88c6f9", 53916,
-        {"head": "1f64956e49517af6", "shell": "8a27214eeb51b76a", "chrome": "db41dc174425a817", "main": "5b074816f67970c6"}),
+    # was b59375433f88c6f9 / 53916 before the Product Inquiry rename (27 Nov 2026)
+    ("spec library",    "/spec/"):                     ("3c446e5fc9818106", 53908,
+        {"head": "1f64956e49517af6", "shell": "8a27214eeb51b76a", "chrome": "1ed59b35933ccc94", "main": "5b074816f67970c6"}),
     # was da65fd57390c41ea / 87604 before the white-label re-baseline (October 2026)
     # was 068b702058c3203b / 69614 before the white-label re-baseline (October 2026)
-    ("BOQs",            "/boq/"):                      ("acb84bf43c52f940", 71757,
-        {"head": "46b1475120f7d5c7", "shell": "8a27214eeb51b76a", "chrome": "c301f31d60092b2b", "main": "4b405bdea65a6caa"}),
+    # was acb84bf43c52f940 / 71757 before the Product Inquiry rename (27 Nov 2026)
+    ("BOQs",            "/boq/"):                      ("261b82551ecb111a", 71749,
+        {"head": "46b1475120f7d5c7", "shell": "8a27214eeb51b76a", "chrome": "8cab72f5e0eec7b2", "main": "4b405bdea65a6caa"}),
     # was 3a5536d4d6af4366 / 94831 before the white-label re-baseline (October 2026)
     # was 086c68b63e5ac306 / 77516 before the white-label re-baseline (October 2026)
-    ("RA bills",        "/ra/"):                       ("1a17baee3eda1b91", 79659,
-        {"head": "b40e623d1615d0d7", "shell": "8a27214eeb51b76a", "chrome": "1e85646c47dbe775", "main": "99f71b979c2d3cca"}),
+    # was 1a17baee3eda1b91 / 79659 before the Product Inquiry rename (27 Nov 2026)
+    ("RA bills",        "/ra/"):                       ("441d10193f5c4a1f", 79651,
+        {"head": "b40e623d1615d0d7", "shell": "8a27214eeb51b76a", "chrome": "acb1df4de9dd48b5", "main": "99f71b979c2d3cca"}),
     # was c8c76cbaad9ecafa / 87366 before the white-label re-baseline (October 2026)
     # was dc3a9edaa632d9a2 / 70047 before the white-label re-baseline (October 2026)
-    ("merged RAs",      "/merged/"):                   ("4e5ca747f26271cf", 72190,
-        {"head": "b3168ced85c4d3ff", "shell": "8a27214eeb51b76a", "chrome": "5173856921ab26b8", "main": "8aaa5b569e4887ea"}),
+    # was 4e5ca747f26271cf / 72190 before the Product Inquiry rename (27 Nov 2026)
+    ("merged RAs",      "/merged/"):                   ("069eaa35fb6243f7", 72182,
+        {"head": "b3168ced85c4d3ff", "shell": "8a27214eeb51b76a", "chrome": "b50a5a94d075523f", "main": "8aaa5b569e4887ea"}),
     # was 0507f0420f7839fd / 86611 / head 2cc6952bbfa08148 before the
     # 23 Sep 2026 delete rollout. ⚠ `head` ALONE moved (+462 bytes of
     # `cascade.CASCADE_STYLES`, loaded by receipt.py's shared `_shell()` so the
@@ -350,48 +359,59 @@ PAGES = {
     # `main` are byte-identical, so the register itself did not change.
     # was c08e0ecf87251688 / 87073 before the white-label re-baseline (October 2026)
     # was 281fe969bf3fe514 / 69754 before the white-label re-baseline (October 2026)
-    ("receipts",        "/receipt/"):                  ("0912cb4b6f148771", 71897,
-        {"head": "860c292408cbb5a7", "shell": "8a27214eeb51b76a", "chrome": "d109dc9bb23b6afa", "main": "62335835c047ac24"}),
+    # was 0912cb4b6f148771 / 71897 before the Product Inquiry rename (27 Nov 2026)
+    ("receipts",        "/receipt/"):                  ("1eddcea4548f253a", 71889,
+        {"head": "860c292408cbb5a7", "shell": "8a27214eeb51b76a", "chrome": "d7cd04ba8cce444a", "main": "62335835c047ac24"}),
     # was b539d6762348461b / 72469 before the white-label re-baseline (October 2026)
     # was 84cbc72de07dba16 / 55151 before the white-label re-baseline (October 2026)
-    ("clients",         "/client/"):                   ("d8e8b98199a8f667", 57294,
-        {"head": "08917bb1259e4cc8", "shell": "8a27214eeb51b76a", "chrome": "f4a151a940ac7b97", "main": "416080f7d9edfbb3"}),
+    # was d8e8b98199a8f667 / 57294 before the Product Inquiry rename (27 Nov 2026)
+    ("clients",         "/client/"):                   ("ea12bade6a3db60a", 57286,
+        {"head": "08917bb1259e4cc8", "shell": "8a27214eeb51b76a", "chrome": "09a37f68b4cd37b9", "main": "416080f7d9edfbb3"}),
     # was fbbdae870b7c8492 / 71208 before the white-label re-baseline (October 2026)
     # was 000d5a084340b0f0 / 53884 before the white-label re-baseline (October 2026)
-    ("draft POs",       "/po/"):                       ("757847bd00afd252", 56027,
-        {"head": "300cc7147d510ac6", "shell": "8a27214eeb51b76a", "chrome": "6b7835055e02a48a", "main": "d4c115a4422d4b7e"}),
+    # was 757847bd00afd252 / 56027 before the Product Inquiry rename (27 Nov 2026)
+    ("draft POs",       "/po/"):                       ("bbaa228432103080", 56007,
+        {"head": "bc13c5a30c6bd081", "shell": "8a27214eeb51b76a", "chrome": "d5d7f0c7f5237576", "main": "4dcc71d99c8106d0"}),
     # was 4ddb960f86b83e82 / 76341 before the white-label re-baseline (October 2026)
     # was fb819eb1638df401 / 59019 before the white-label re-baseline (October 2026)
-    ("challans",        "/dc/"):                       ("456ac847a09ab607", 61162,
-        {"head": "05dcc562e23dd666", "shell": "8a27214eeb51b76a", "chrome": "c86b240269ffaa26", "main": "00010743d840cfac"}),
+    # was 456ac847a09ab607 / 61162 before the Product Inquiry rename (27 Nov 2026)
+    ("challans",        "/dc/"):                       ("3654258a5a40a094", 61154,
+        {"head": "05dcc562e23dd666", "shell": "8a27214eeb51b76a", "chrome": "89785eee3cc1934c", "main": "00010743d840cfac"}),
     # was 087142596310c260 / 68945 before the white-label re-baseline (October 2026)
     # was 18c2827462adfa01 / 51623 before the white-label re-baseline (October 2026)
-    ("measurements",    "/measurement/"):              ("1d4c29955771a62d", 53766,
-        {"head": "2dd39912087b1421", "shell": "8a27214eeb51b76a", "chrome": "6b988e930027b906", "main": "25fdd7e4c985b0ba"}),
+    # was 1d4c29955771a62d / 53766 before the Product Inquiry rename (27 Nov 2026)
+    ("measurements",    "/measurement/"):              ("54cb2b4c932ce2b9", 53758,
+        {"head": "2dd39912087b1421", "shell": "8a27214eeb51b76a", "chrome": "049028461630482b", "main": "25fdd7e4c985b0ba"}),
     # was 1dcdc0e2798636eb / 49548 before the white-label re-baseline (October 2026)
     # was c81435618b26f7d7 / 32231 before the white-label re-baseline (October 2026)
-    ("projects",        "/projects/"):                 ("044ec4a633b70714", 34374,
-        {"head": "bf5cadc91d957acf", "shell": "8a27214eeb51b76a", "chrome": "f6a7a5f2c20969e5", "main": "d9bb0470f4e0f231"}),
+    # was 044ec4a633b70714 / 34374 before the Product Inquiry rename (27 Nov 2026)
+    ("projects",        "/projects/"):                 ("28e9691978d34a48", 34366,
+        {"head": "bf5cadc91d957acf", "shell": "8a27214eeb51b76a", "chrome": "d702ec5abbcc420b", "main": "d9bb0470f4e0f231"}),
     # was 74f683d1a779159f / 76963 before the white-label re-baseline (October 2026)
     # was 9d555843bde69793 / 59652 before the white-label re-baseline (October 2026)
-    ("project page",    f"/projects/view/{GOLD_PROJECT}"): ("a130561a600fa7fe", 61795,
-        {"head": "b1d452e9017df109", "shell": "8a27214eeb51b76a", "chrome": "cb03467cf94d9224", "main": "e559f0bcd62a8829"}),
+    # was a130561a600fa7fe / 61795 before the Product Inquiry rename (27 Nov 2026)
+    ("project page",    f"/projects/view/{GOLD_PROJECT}"): ("58b7f53b2bf1411a", 61787,
+        {"head": "b1d452e9017df109", "shell": "8a27214eeb51b76a", "chrome": "b73c7948e46bd897", "main": "e559f0bcd62a8829"}),
     # was fd7d40f31d63a52e / 66359 before the white-label re-baseline (October 2026)
     # was a3e368d5049fc080 / 49045 before the white-label re-baseline (October 2026)
-    ("employees",       "/employee/"):                 ("b2190c2241795900", 51188,
-        {"head": "8453b6f6704eafcb", "shell": "8a27214eeb51b76a", "chrome": "f4b447104d7af38e", "main": "57d7037c60fdeb48"}),
+    # was b2190c2241795900 / 51188 before the Product Inquiry rename (27 Nov 2026)
+    ("employees",       "/employee/"):                 ("5bad6ce3e36ad65b", 51180,
+        {"head": "8453b6f6704eafcb", "shell": "8a27214eeb51b76a", "chrome": "34c6eaefcf20360e", "main": "57d7037c60fdeb48"}),
     # was 772b3d71abb8f8ee / 72731 before the white-label re-baseline (October 2026)
     # was 4d0c86dacdebbcbe / 55416 before the white-label re-baseline (October 2026)
-    ("attendance",      f"/attendance/?date={GOLD_DATE}"): ("b6bf117f7a7caf75", 57559,
-        {"head": "c0d5aa122d762d49", "shell": "8a27214eeb51b76a", "chrome": "9a358b0b70f84037", "main": "2ff637b8a8fdab2a"}),
+    # was b6bf117f7a7caf75 / 57559 before the Product Inquiry rename (27 Nov 2026)
+    ("attendance",      f"/attendance/?date={GOLD_DATE}"): ("2930466215d64ae1", 57551,
+        {"head": "c0d5aa122d762d49", "shell": "8a27214eeb51b76a", "chrome": "a104ecb662aa50be", "main": "2ff637b8a8fdab2a"}),
     # was 52eec3cf3cd7c8cd / 66001 before the white-label re-baseline (October 2026)
     # was 0469ebdec7ce6bf7 / 48683 before the white-label re-baseline (October 2026)
-    ("charges",         "/charge/"):                   ("ac61979355310e12", 50826,
-        {"head": "3570a389ec06c23c", "shell": "8a27214eeb51b76a", "chrome": "d123ba97ca43d439", "main": "8c02fcfc0de05545"}),
+    # was ac61979355310e12 / 50826 before the Product Inquiry rename (27 Nov 2026)
+    ("charges",         "/charge/"):                   ("6e1fa577cd83a3ab", 50818,
+        {"head": "3570a389ec06c23c", "shell": "8a27214eeb51b76a", "chrome": "c068e2333c46cc49", "main": "8c02fcfc0de05545"}),
     # was def4ca415fbc0f49 / 75650 before the white-label re-baseline (October 2026)
     # was 6773497e89718a2f / 58068 before the white-label re-baseline (October 2026)
-    ("address book",    "/address/"):                  ("e2c17da9faf8328b", 60211,
-        {"head": "0155fdb201cec6ec", "shell": "8a27214eeb51b76a", "chrome": "346d3deea1827cab", "main": "cfd20bb75d6529e8"}),
+    # was e2c17da9faf8328b / 60211 before the Product Inquiry rename (27 Nov 2026)
+    ("address book",    "/address/"):                  ("127c848585ba9f9a", 60203,
+        {"head": "0155fdb201cec6ec", "shell": "8a27214eeb51b76a", "chrome": "b61977d20d217d26", "main": "cfd20bb75d6529e8"}),
     # ⚠ **RE-BASELINED 25 September 2026 — `main` ONLY, and it is the ONE
     #   golden this application's go-live hardening was always going to move.**
     #   ABOUT.md §7 gap 36 is closed by adding a **Starting Numbers** section to
@@ -418,8 +438,9 @@ PAGES = {
     #         "chrome": "d107029c10eb2dec", "main": "741824ea93f3b3cb"})
     # was a499293306ea5d30 / 80230 before the white-label re-baseline (October 2026)
     # was 6dc5c9c79a1632f1 / 68394 before the white-label re-baseline (October 2026)
-    ("settings",        "/settings/"):                 ("75c66f3ae4969cec", 70537,
-        {"head": "66b2e7a06db7605d", "shell": "8a27214eeb51b76a", "chrome": "6434454bf584715f", "main": "657ab277bd150df2"}),
+    # was 75c66f3ae4969cec / 70537 before the Product Inquiry rename (27 Nov 2026)
+    ("settings",        "/settings/"):                 ("e51b1ed47d15b2a2", 70538,
+        {"head": "66b2e7a06db7605d", "shell": "8a27214eeb51b76a", "chrome": "e1753827ab127faf", "main": "87c073f00b4a938d"}),
     # ⚠ re-baselined 22 September 2026 — `head` ONLY, by the four CSS rules the
     # role picker and the empty action cell needed (`AUTH_ADMIN_STYLES`, +262
     # bytes). `main` is byte-identical and that is the measurement that matters
@@ -428,8 +449,9 @@ PAGES = {
     # drawn. A moved `main` would have meant the Owner lost something.
     # was 6f28cf4801fb6f4c / 65758 before the white-label re-baseline (October 2026)
     # was feb5e7bfeab32ce7 / 48444 before the white-label re-baseline (October 2026)
-    ("users",           "/users"):                     ("eb61b5304608fc62", 50587,
-        {"head": "f7f989d34971a0fa", "shell": "8a27214eeb51b76a", "chrome": "fd6ce596c842329f", "main": "645012baa0685fdd"}),
+    # was eb61b5304608fc62 / 50587 before the Product Inquiry rename (27 Nov 2026)
+    ("users",           "/users"):                     ("7c2f66e3e0328f16", 50579,
+        {"head": "f7f989d34971a0fa", "shell": "8a27214eeb51b76a", "chrome": "64ca8f2ed5d3cc67", "main": "645012baa0685fdd"}),
 }
 
 

@@ -2573,7 +2573,7 @@ def view_boq(id: str):
     if is_tip:
         ra_btns = (
             f'<a href="{url_for("po_draft.create_po", boq=id)}" '
-            f'class="btn btn-ghost">&#43;&nbsp;Draft PO</a>'
+            f'class="btn btn-ghost">&#43;&nbsp;Product Inquiry</a>'
             f'<a href="{url_for("purchase.from_boq", boq_id=id)}" '
             f'class="btn btn-ghost">&#43;&nbsp;Raise Purchase Order</a>'
             f'<a href="{url_for("challan.create_dc", boq=id)}" '

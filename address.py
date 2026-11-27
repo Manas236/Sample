@@ -227,7 +227,7 @@ REFERENCE_SOURCES = (
     ("attendance",        "site_address_id", "site",
      "Attendance",       ("employee_name", "date"),     "attendance.edit_attendance"),
     ("purchase_orders",   "vendor_id",       "vendor_name",
-     "Draft PO",         ("ref",),                      "po_draft.view_po"),
+     "Product Inquiry", ("ref",),                      "po_draft.view_po"),
     ("purchases",         "vendor_id",       "vendor_name",
      "Purchase order",   ("ref",),                      "purchase.view_purchase"),
     ("delivery_challans", "consignee_id",    "consignee_name",

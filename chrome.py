@@ -698,7 +698,9 @@ REGISTERS = (
     _reg("buy", "purchase", "Purchase Orders", "purchase",
          "purchase.list_purchases", _n("purchases"), "raised",
          "purchase.create_purchase", "New purchase order"),
-    _reg("buy", "po_draft", "Draft Purchase Orders", "draft",
+    # The LABEL only (27 Nov 2026, FEATURE_GAP.md 2a); the blueprint key, the
+    # endpoint and the collection are untouched, so every URL and grant holds.
+    _reg("buy", "po_draft", "Product Inquiries", "draft",
          "po_draft.list_pos", _n("purchase_orders"), "raised"),
     _reg("buy", "charge", "Expenses &amp; Charges", "charge",
          "charge.list_charges", _n("charges"), "entries",

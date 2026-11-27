@@ -453,13 +453,13 @@ def _validate_po_series(form) -> tuple:
     data = {"prefix":  (form.get("po_prefix") or "").strip(),
             "next_no": (form.get("po_next_no") or "").strip()}
     if data["prefix"] and len(data["prefix"]) > 32:
-        return data, "Draft PO prefix: keep it under 32 characters."
+        return data, "Product inquiry prefix: keep it under 32 characters."
     raw = data["next_no"]
     if raw:
         if not raw.isdigit():
-            return data, "Draft PO next number: digits only."
+            return data, "Product inquiry next number: digits only."
         if int(raw) < 1:
-            return data, "Draft PO next number: must be 1 or more."
+            return data, "Product inquiry next number: must be 1 or more."
     return data, ""
 
 
@@ -1192,7 +1192,7 @@ def edit_settings():
         </div>
 
         <div class="form-section">
-          <div class="section-title">Draft Purchase Order Series</div>
+          <div class="section-title">Product Inquiry Series</div>
           <p class="fld-hint" style="margin:-.5rem 0 1rem;">
             <b>One running series across all suppliers and all sites</b>, so it
             can continue the numbers already kept on paper. Set the next number
@@ -1217,7 +1217,7 @@ def edit_settings():
                      inputmode="numeric"
                      value="{P.esc(po_values.get('next_no', ''))}"
                      placeholder="{P.esc(PO_SERIES_DEFAULTS['next_no'])}"/>
-              <div class="fld-hint">Advances on every draft PO raised.</div>
+              <div class="fld-hint">Advances on every product inquiry raised.</div>
             </div>
           </div>
         </div>
@@ -1225,7 +1225,7 @@ def edit_settings():
         <div class="form-section">
           <div class="section-title">Delivery Challan Series</div>
           <p class="fld-hint" style="margin:-.5rem 0 1rem;">
-            <b>One running series across all sites</b>, like the draft PO and
+            <b>One running series across all sites</b>, like the product inquiry and
             unlike the RA bill number. The prefix is <b>blank by default</b>,
             because the challan book it continues numbers in bare integers
             &mdash; challan <b>54</b>, not <b>DC/0054</b>. Set the next

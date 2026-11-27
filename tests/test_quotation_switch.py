@@ -180,8 +180,9 @@ def switch_on(fixed_world):
 #       OFF_WHOLE = "b467ca97ab34d077"
 #       OFF_LEN = 87068
 #       OFF_BLOCKS = {"head": "a7fcb956a04f035f", …}
-OFF_WHOLE = "2c5cb97571d92f87"
-OFF_LEN = 97012
+# was 2c5cb97571d92f87 / 97012 before the Product Inquiry rename (27 Nov 2026)
+OFF_WHOLE = "9dbebcc576dc1094"
+OFF_LEN = 97004
 
 # The page split on its structural markers, so a failure names which part
 # moved: the chrome, the item section, the picker's script, or the demo fill.
@@ -197,7 +198,7 @@ OFF_MARKERS = [
     ("demo",     "function fillDemoData()"),
     ("guard",    "/* ═══ FORM GUARD"),
 ]
-OFF_BLOCKS = {"head":     "ddf6b72bbbff6472",   # was 40c96e4eddff5169; was 7dbd9ab6dadddd9d; was a7fcb956a04f035f
+OFF_BLOCKS = {"head":     "75e616536d5069d7",   # was 40c96e4eddff5169; was 7dbd9ab6dadddd9d; was a7fcb956a04f035f
               "form":     "2860c99f0e7d0cfe",   # was 370e5e115dc4c883
               "items":    "d6edae72844a0261",   # was 374b85b7f0fd495d
               "tax":      "5c9263e39e45c40f",   # was ddb32a58ad86df59

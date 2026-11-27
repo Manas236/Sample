@@ -105,11 +105,11 @@ Grouped the way the role editor groups them, so this page and that screen can be
 | Update a purchase order's status<br/>`purchase.edit` | · | · | · |  |  | · |  |
 | Delete a purchase order<br/>`purchase.delete` | · | · |  |  |  |  |  |
 | Approve or reject a purchase order ⊗ *switched off*<br/>`purchase.approve` | ⊗ | ⊗ | ⊗ |  |  |  |  |
-| View draft purchase orders<br/>`po.view` | · | · | · |  |  | · |  |
-| Raise a draft purchase order<br/>`po.create` | · | · | · |  |  | · |  |
-| Edit a draft purchase order<br/>`po.edit` | · | · | · |  |  | · |  |
-| Delete a draft purchase order<br/>`po.delete` | · | · | · |  |  | · |  |
-| Print a draft purchase order<br/>`po.print` | · | · | · |  |  | · |  |
+| View product inquiries<br/>`po.view` | · | · | · |  |  | · |  |
+| Raise a product inquiry<br/>`po.create` | · | · | · |  |  | · |  |
+| Edit a product inquiry<br/>`po.edit` | · | · | · |  |  | · |  |
+| Delete a product inquiry<br/>`po.delete` | · | · | · |  |  | · |  |
+| Print a product inquiry<br/>`po.print` | · | · | · |  |  | · |  |
 
 ### Dispatch
 

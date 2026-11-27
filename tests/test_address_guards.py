@@ -149,7 +149,7 @@ def test_the_three_vendor_and_consignee_collections_are_references():
                                           "consignee_id": aid, "consignee_name": ""}
     refs = AD.references_of(aid)
     assert sorted(r["kind"] for r in refs) == [
-        "Delivery challan", "Draft PO", "Purchase order"]
+        "Delivery challan", "Product Inquiry", "Purchase order"]
     by_kind = {r["kind"]: r["how"] for r in refs}
     assert by_kind["Purchase order"] == "label", (
         "a PO carrying only the vendor's company name was not matched — "

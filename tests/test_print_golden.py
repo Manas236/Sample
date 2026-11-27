@@ -1067,9 +1067,10 @@ GOLD_PICK_BOQ = "gold-pick"
 #     confirmation page so it can draw the "this also destroys N records"
 #     block. It is loaded in po_draft.py's shared head, which this form
 #     shares; the picker itself did not change.
-PICK_WHOLE = "b0897c22f492ab0c"
-PICK_LEN = 66653
-PICK_BLOCKS = {"head":    "f2693f43c068cea2",   # was 2404db0809a336a1; was b07f3fb758299248; was af77ecc07bfca6ff,
+# was b0897c22f492ab0c / 66653 before the Product Inquiry rename (27 Nov 2026)
+PICK_WHOLE = "0f60880679e693b5"
+PICK_LEN = 66658
+PICK_BLOCKS = {"head":    "c6136cfcebcbf772",   # was 2404db0809a336a1; was b07f3fb758299248; was af77ecc07bfca6ff,
                                                 # was 8bf28275fa127606,
                                                 # was 2bf1b714db890d61,
                                                 # was 04f4809335b2c9e8
@@ -1080,7 +1081,7 @@ PICK_BLOCKS = {"head":    "f2693f43c068cea2",   # was 2404db0809a336a1; was b07f
                "tools":   "76ba5972ff18f235",
                "rows":    "a57b4602a006fa6f",
                "payload": "0b433e5e3f3e5705",
-               "js":      "4e37588b196e0191"}   # was f1bae1908e487e97
+               "js":      "24b6df592dc73158"}   # was f1bae1908e487e97
 
 
 def test_the_boq_line_picker_is_unchanged(client, golden_picker):
@@ -1705,12 +1706,13 @@ BOQ_BLOCKS = {"head":       "3ba347e32b071b66",   # was c945d7ee01ba87eb
               "grand":      "2599e3fd773e385a",
               "signature":  "ee5b8d5d18136c40"}   # was 7812a7b5e2ddb967
 
-DPO_WHOLE, DPO_LEN = "412bf10c3e70fc20", 45839
+# was 412bf10c3e70fc20 / 45839 before the Product Inquiry rename (27 Nov 2026)
+DPO_WHOLE, DPO_LEN = "ebe0a7f97e56e10d", 45833
 DPO_BLOCKS = {"head":       "8b1a9086f3aba777",   # was 9c5d3f7bb956b98a
               "letterhead": "e4510b8f28e5b525",   # was 2800166c693cc2f1
               "foot-strip": "2736daa860720d91",   # was 1efaaf73d3a0a076
-              "doc-box":    "9370df26fb1e5084",
-              "party":      "9d2c110ac7505977",   # was 9d89e73813bb61f7
+              "doc-box":    "eeefd89c87b05cda",
+              "party":      "c1e2c91f15271d03",   # was 9d89e73813bb61f7
               "items":      "bb3a316d1cd1b2cc",
               "signature":  "dc3d4a7f543b4bf4"}   # was 66c13b84cc80040d
 
@@ -1795,7 +1797,7 @@ def test_the_three_newly_pinned_goldens_are_hashing_real_documents(
     assert "Site A Rates" not in boq, "the print must not carry the rate basis"
 
     dpo = client.get(f"/po/print/{GOLD_DPO}").get_data(as_text=True)
-    assert "DRAFT PURCHASE ORDER" in dpo and "DP/DPO/0007" in dpo
+    assert "PRODUCT INQUIRY" in dpo and "DP/DPO/0007" in dpo
     assert "Standard" in dpo, "the supplier block rendered nothing"
     assert "80 mm dia" in dpo, "the picked lines rendered nothing"
 

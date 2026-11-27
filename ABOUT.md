@@ -2047,6 +2047,22 @@ leaf (`store` + `pipeline`); `ra.py` imports it, it imports nothing upstream.
   BOQ and to the Supply + Installation one-POST bill — neither exists here
   (FEATURE_GAP.md rows 4a, 4b).
 
+
+### 2n. The draft PO is displayed as "Product Inquiry" (27 November 2026)
+
+FEATURE_GAP.md row 2a. **Display text only**: the rail label, page titles and
+headings, the printed document's title (`PRODUCT INQUIRY`, number label
+`Inquiry No.`), the BOQ button, flash messages, the cascade and address-book
+labels, the settings series heading and the five `po.*` permission
+DESCRIPTIONS. **Unchanged on purpose:** the blueprint (`po_draft`), every
+endpoint and URL (`/po/...`), the collection (`purchase_orders`), the five
+permission IDs (so no role's grants move), the number series and every
+existing document number (`…/DPO/…`). Elsewhere in this file "draft PO" still
+names the same record. Every page golden moved in its `chrome` block (the rail
+label) and was re-baselined with a `# was …` line; the draft-PO print golden,
+the BOQ line-picker form and the OFF-state quotation form moved for the same
+label and were re-baselined the same way.
+
 ---
 
 ## 3. Data model

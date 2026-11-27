@@ -82,7 +82,7 @@ CASCADE_GRAPH: dict[str, list[Edge]] = {
         Edge("ra_bills", ("boq_id",), "RA Bill"),
         Edge("delivery_challans", ("boq_id",), "Delivery Challan"),
         Edge("measurements", ("boq_id",), "Measurement Sheet"),
-        Edge("purchase_orders", ("boq_id",), "Draft Purchase Order"),
+        Edge("purchase_orders", ("boq_id",), "Product Inquiry"),
         Edge("purchases", ("boq_id",), "Purchase Order"),
     ],
     "ra_bills": [
