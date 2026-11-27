@@ -117,14 +117,31 @@ dedicated TDS / retention field is on the roadmap (FEATURE_GAP 5).
 
 **Don't click:** *New receipt* (it would change the balances you just showed).
 
-## 8. Project page — the money on one page (2 min)
+## 8. Project page — the real margin (2 min)
 
-**Click:** *Projects* → **Shree Ganesh Polymers — 350 kWp Rooftop**. One page
-holds the BOQ, every RA bill, the receipts, the purchase orders, the expenses
-(transport, crane hire, safety kit) and the site labour booked to the project.
+**Click:** *Projects* → **Shree Ganesh Polymers — 350 kWp Rooftop**. The
+**Profit & Loss** panel at the top:
 
-**Pain it solves:** knowing the real position per project — billed, received,
-committed to vendors and spent on site — without waiting for the accountant.
+- **Contract value** ≈ ₹1.04 crore (rev 1 only — rev 0 is named under the BOQ
+  table as superseded and is not added in).
+- **Billed to date** ≈ ₹1.02 crore (98% of contract, three issued RA bills).
+- **Still owed** ≈ ₹20.9 lakh — the TDS and the short payment, with GST.
+- **Planned margin** ≈ ₹8.1 lakh (7.8%) from the BOQ's base rates, against
+  **actual margin to date** ≈ ₹6.5 lakh: purchase and work orders, expenses
+  (transport, crane hire, safety kit) and the six workers' wages.
+- A **cost-split** donut and three bars: billed vs contract, received vs billed,
+  cost vs planned cost. Below it, every **RA bill** with what was received
+  against it, then the BOQ, POs, expenses and the site labour.
+
+Open **Green Valley CHS — 60 kWp** for contrast: BOQ issued, one challan, a
+draft RA — nothing billed yet.
+
+**Pain it solves:** knowing the real margin per project while the job is still
+running, not at year-end — and seeing at once that cost is tracking the plan.
+
+**Say if asked:** planned uses our BOQ cost, actual uses what was actually
+ordered and paid on site; GST is left out of the margin. Signed in as
+`accounts`, the labour wages are withheld and the panel says so.
 
 **Don't click:** links into documents you have not shown yet; keep it to this page.
 

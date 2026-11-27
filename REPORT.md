@@ -9,7 +9,7 @@ Branches pushed to Sample: `main` and `demo/solar-epc`, nothing else.
 | Level | State |
 |---|---|
 | **P0** | **Done.** Step 0, items 1–5 ported or explicitly deferred, the seed with Project 1 populated, the app starts, every print route renders, RUN_LOCAL.md, DEMO_SCRIPT.md, this report. |
-| **P1** | See the P1 section at the foot. Project 2 and the quotation-only lead are seeded, and the branding swap is verified by a test. Items 6–10 are recorded there. |
+| **P1** | **Partly done.** Project 2 and the quotation-only lead are seeded, the branding swap is verified by a test, and **item 7** (project Profit & Loss) is ported. Items 6, 8, 9 and 10 are **deferred** with reasons (FEATURE_GAP.md). Screen copy polish: none beyond the ports. |
 | **P2** | Not started (the screen restyle). |
 
 ## Step 0 — gates
@@ -44,6 +44,8 @@ present (the one `customer_docs` test skips).
 | `ccceb6b` | Item 4c — billing above the BOQ quantity with a reason | `boqexcess.py` (new), `ra.py`, `ABOUT.md`, `tests/test_boq_excess.py` (new), `tests/test_import_directions.py` |
 | `bdcf6b1` | Item 2a — Draft PO displayed as "Product Inquiry" | `po_draft.py`, `purchase.py`, `boq.py`, `chrome.py`, `auth.py`, `address.py`, `cascade.py`, `settings.py`, `docs/ACCESS_MATRIX.md`, `ABOUT.md`, `tests/test_page_golden.py`, `tests/test_print_golden.py`, `tests/test_quotation_switch.py`, `tests/test_address_guards.py`, `tests/test_delete_rollout.py`, `tests/test_nav_visibility.py` |
 | `6115b35` | FEATURE_GAP.md outcomes, items 1–5 | `FEATURE_GAP.md` |
+| `bb79b0e` | Item 7 — project Profit & Loss, planned vs actual (lean) | `pnl.py` (new), `projectview.py`, `attendance.py`, `ABOUT.md`, `PROGRESS.md`, `FEATURE_GAP.md`, `tests/test_project_pnl.py` (new), `tests/test_project.py`, `tests/test_import_directions.py`, `tests/test_page_golden.py` |
+| `fffcd3d` | FEATURE_GAP.md outcomes, items 6, 8, 9, 10 | `FEATURE_GAP.md` |
 
 ### `demo/solar-epc` (pushed; `main` plus these)
 
@@ -51,13 +53,16 @@ present (the one `customer_docs` test skips).
 |---|---|---|
 | `2b7a56c` | The solar seed, the demo seed tool, RUN_LOCAL.md | `solar_seed.py` (new), `tools/seed_demo.py`, `RUN_LOCAL.md` (new), `tests/test_solar_seed.py` (new), `tests/test_import_directions.py` |
 | `c6d08a8` | DEMO_SCRIPT.md and the rebrand test | `DEMO_SCRIPT.md` (new), `tests/test_solar_seed.py` |
-| *(tip)* | This report | `REPORT.md` (new) |
+| `98beb33` | This report, P0 checkpoint | `REPORT.md` (new) |
+| `5c30f1a` | Report: do not quote the client term Step 0 found | `REPORT.md` |
+| `abcf6b2` | Merge `main` (item 7, FEATURE_GAP outcomes) into the demo branch | merge commit |
+| *(tip)* | Project 1 margin test, DEMO_SCRIPT step 8, this report's final state | `tests/test_solar_seed.py`, `DEMO_SCRIPT.md`, `REPORT.md` |
 
 Files touched that the brief did not name: `PROVENANCE.md`, `.gitignore`,
 `sheetimport.py`, `INTRODUCTION.md`, `PROGRESS.md`, `ABOUT.md`,
 `docs/ACCESS_MATRIX.md`, `auth.py`, `address.py`, `cascade.py`, `chrome.py`,
-`settings.py`, `purchase.py`, `po_draft.py`, `ra.py`, and the test files listed
-above. Each one is in the table with its commit.
+`settings.py`, `purchase.py`, `po_draft.py`, `ra.py`, `projectview.py`,
+`attendance.py`, and the test files listed above. Each one is in the table with its commit.
 
 ## Judgement calls (every one this brief did not decide)
 
@@ -85,6 +90,13 @@ above. Each one is in the table with its commit.
 17. **4c — the stored `excess_lines` snapshot** records what was over at save. The cumulative itself is still derived by summing (invariant 7 holds); nothing reads the snapshot back to decide anything.
 18. **Deferred as L-sized or tangled:** 2b, 2c, 2d, 3a, 3b, 4a, 4b (FEATURE_GAP.md has the reason for each).
 19. **Item 5 — "deferred: not on origin"**, as you instructed.
+
+19a. **Item 7 reverses the product's own C6 block** ("no margin, no profit, no net" on the project page; PROGRESS.md had C6 BLOCKED on the client's labour-cost question). Your brief asks for planned vs actual margin, and you own the product, so this overrode rule 3's "Sample wins" for this one rule. It is recorded in PROGRESS.md (C6 → BUILT), ABOUT.md §2o and FEATURE_GAP.md. The labour question is answered by separation: planned uses BOQ base rates only, actual uses orders, expenses and wages only.
+19b. **Item 7's arithmetic lives in a new leaf, `pnl.py`**; `projectview.py` renders it and still computes no cross-panel figure. Three tests that held the old rule were **restated, not deleted**: `test_project.py`'s wording test now confines profit/margin/net to the P&L panel and keeps the cross-panel check on every other panel, and its stacking fixture became an independent second BOQ. Wage arithmetic stays in `attendance.py` through a new accessor, `labour_cost_for_project()`.
+19c. **Item 7 — definitions:** GST is excluded from the margin; committed cost counts POs that are issued but not cancelled, whether delivered or not; drafts are counted separately and cancelled bills never. Labour is withheld (and the panel says so) for any role without `attendance.view`; in this product that includes Operation Head.
+19d. **The project page's BOQ panel now shows the latest revision only**, and superseded revisions are named, not added (item 7's "no stacking"). The `project page` golden moved and was re-baselined.
+19e. **Items 6, 8, 9 and 10 deferred** for time after P0 and item 7 (reasons in FEATURE_GAP.md). Payslips are on DEMO_SCRIPT.md's don't-promise list.
+19f. **`main` was merged into the demo branch** (a merge commit), not rebased, so the demo branch's pushed history is never rewritten.
 
 **Seed and demo**
 
@@ -121,7 +133,9 @@ above. Each one is in the table with its commit.
 |---|---|---|---|
 | Baseline, `main` @ `161ab55` | 3,665 | 4 | 0 |
 | `main` @ `bdcf6b1` (last code commit on main) | 3,702 | 4 | 0 |
-| `demo/solar-epc` @ `c6d08a8` | 3,713 | 4 | 0 |
+| `demo/solar-epc` @ `c6d08a8` (P0 checkpoint) | 3,713 | 4 | 0 |
+| `main` @ `bb79b0e` (item 7) | 3,719 | 4 | 0 |
+| `demo/solar-epc` @ tip (final) | 3,731 | 4 | 0 |
 
 The 4 skips are the same 4 as the baseline: no client workbook on this box,
 one form that carries `.no-print` by design, and the challan and measurement
@@ -159,14 +173,22 @@ sheet carrying no statutory identity block by design.
 persistence ON - 360 record(s) loaded", serving on http://127.0.0.1:5001 (this
 box's `.env` sets the port).
 
-**Every page, every role, over real HTTP:** I signed in through `/login` as
-each of the 7 users and requested 90 URLs each: the 51 argument-free GET routes
-(less `/logout`), plus 40 document pages: the view / print / summary page of
-every seeded BOQ, RA bill, challan, inquiry, measurement sheet, quotation, PO
-and project, 21 of them printable. **630 requests: 356 × 200, 18 × 302,
-256 × 403, 0 × 500, 0 errors.** The 403s are each role's permissions working
-(HR sees 11 pages). The Owner's two 403s are the product catalogue and the
-approvals page, both switched off for everyone in this product.
+**Every page, every role, over real HTTP (final run, after item 7):** I
+signed in through `/login` as each of the 7 users and requested 92 URLs each:
+the 50 argument-free GET routes (less `/logout`), plus 42 document pages: the
+view / print / summary / edit page of every seeded BOQ, RA bill, challan,
+inquiry, measurement sheet, quotation, PO, receipt and project.
+**644 requests: 362 × 200, 18 × 302, 264 × 403, 0 × 500, 0 errors.** The 403s
+are each role's permissions working (HR sees 11 pages). The Owner's two 403s
+are the product catalogue and the approvals page, both switched off for
+everyone in this product. The P&L panel showed labour to Owner and Director
+and "withheld for your role" to Operation Head, Sales, Purchase and Accounts.
+(The P0 checkpoint run was 630 requests, also 0 errors.)
+
+**Project 1's Profit & Loss** (signed in as `owner`): contract ₹1,03,89,297,
+billed ₹1,02,17,747 (98.3%), still owed ₹20,85,147, planned margin ₹8,05,980
+(7.8%), actual margin to date ₹6,53,472 after ₹2,43,750 of site labour.
+Held by `tests/test_solar_seed.py::test_project_1_shows_a_positive_planned_and_actual_margin_and_money_owed`.
 
 **Every print route for every seeded document** (3 BOQs, 4 RA bills, 4
 challans, 2 inquiries, 1 measurement sheet, 2 quotations, 5 POs) renders 200 in
@@ -192,9 +214,9 @@ forbids.
 
 ## P1 status
 
-- **Project 2 + the quotation-only lead:** seeded (above).
-- **Branding swap:** verified by test; steps in DEMO_SCRIPT.md. No signature/stamp images (deferred).
-- **Items 6–10:** see below.
-- **Screen copy polish:** none beyond what the ports and the seed brought.
-
-At this checkpoint (P0 complete) items 6–10 are not ported; FEATURE_GAP.md marks them "see below". This section is updated if a later commit on this branch changes that.
+- **Project 2 + the quotation-only lead:** seeded.
+- **Branding swap:** verified by test; steps in DEMO_SCRIPT.md. There are no signature/stamp images (deferred).
+- **Item 7:** ported (lean), on both branches.
+- **Items 6, 8, 9, 10:** deferred; reasons in FEATURE_GAP.md.
+- **Screen copy polish:** none beyond what the ports and the seed brought (the project page reads well with the demo data: populated tiles, donut and bars, and no empty states on the demo path).
+- **P2:** not started.

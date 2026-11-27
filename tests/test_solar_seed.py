@@ -176,3 +176,18 @@ def test_a_rebrand_in_settings_reaches_every_printed_document(built, client):
     for s in ("27AAAAA0000A1Z2", "Prospect Demo Bank", "PROS0000001", "Unit 9, Example Estate"):
         assert s in ra, s
     assert STORE["settings"]["logo"]["doc"] in ra, "the new logo is on the printed bill"
+
+
+def test_project_1_shows_a_positive_planned_and_actual_margin_and_money_owed(built, client):
+    """The demo's step 8: the Profit & Loss panel (pnl.py) on Project 1."""
+    import pnl as PNL
+    import attendance as AT
+    import settings as S
+    labour = AT.labour_cost_for_project(built["project1"], S.ot_multiplier())
+    f = PNL.figures(built["project1"], labour=labour)
+    assert [b["id"] for b in f["revisions"]] == [built["boq1"]]      # rev 1 only
+    assert f["planned_margin"] > 0 and 5 < f["planned_margin_pct"] < 12
+    assert labour > 0 and f["actual_margin"] > 0
+    assert f["outstanding"] > 0 and f["billed_pct"] > 90
+    html = client.get(f"/projects/view/{built['project1']}").get_data(as_text=True)
+    assert PNL.money(f["actual_margin"]) in html and "Superseded, not counted" in html
