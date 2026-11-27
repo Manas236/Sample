@@ -390,8 +390,9 @@ PAGES = {
     # was 74f683d1a779159f / 76963 before the white-label re-baseline (October 2026)
     # was 9d555843bde69793 / 59652 before the white-label re-baseline (October 2026)
     # was a130561a600fa7fe / 61795 before the Product Inquiry rename (27 Nov 2026)
-    ("project page",    f"/projects/view/{GOLD_PROJECT}"): ("58b7f53b2bf1411a", 61787,
-        {"head": "b1d452e9017df109", "shell": "8a27214eeb51b76a", "chrome": "b73c7948e46bd897", "main": "e559f0bcd62a8829"}),
+    # was 58b7f53b2bf1411a / 61787 before the Profit & Loss and RA-bills panels (27 Nov 2026)
+    ("project page",    f"/projects/view/{GOLD_PROJECT}"): ("5a191a8307f1bc70", 67209,
+        {"head": "869f4ed6e4102f76", "shell": "8a27214eeb51b76a", "chrome": "b73c7948e46bd897", "main": "443a3f40779f8899"}),
     # was fd7d40f31d63a52e / 66359 before the white-label re-baseline (October 2026)
     # was a3e368d5049fc080 / 49045 before the white-label re-baseline (October 2026)
     # was b2190c2241795900 / 51188 before the Product Inquiry rename (27 Nov 2026)

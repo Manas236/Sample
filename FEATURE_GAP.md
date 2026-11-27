@@ -39,11 +39,11 @@ covers it).
 | 4b | Supply + Installation in one POST, merged tax invoice; set cancelled as one | `976010d`, `c33200c` · `raboth.py`, `ra.py`, `merged_ra.py` | L | **deferred** |
 | 4c | RA / TI quantity above the BOQ, with a required reason | `ac887bc` · `boqexcess.py`, `ra.py`, `invoice.py` | M | **ported** |
 | 5 | Receipts as a BOQ running account with TDS / retention / other deductions | — not at `e1ac14f` | — | **deferred: not on origin** (the work exists only on the live server and was never pushed to Demo_Works) |
-| 6 | Round-off to the rupee, a per-document tick, on by default | `09a028b`, `0cee4d4`, `d2e3234` · `roundoff.py` + every money module | M | see below |
-| 7 | Project page: documents follow their BOQ (latest revision only), labour cost, cost pie + progress bars, planned vs actual margin | `a6ab6c4`, `19dc55d`, `7f2fd07`, `7308d26`, `456c980`, `e793dfa`, `9edba90`, `4f1360f`, `2df435e` · `pnl.py`, `pnl_chart.py`, `projtag.py`, `projectview.py` | L | see below |
-| 8 | Labour attendance workbook import + payslips + pay ledger | `de9d757`, `078e1e3`, `0c397c5`, `9b3ef4c`, `8dad301` · `payimport.py`, `payroll.py`, `attendance.py` | L | see below |
-| 9 | BOQ revision numbered off its root (`/0019/1`, print shows `/0019`) | `1eb36ca` · `boq.py`, `series.py`, `pipeline.py` | M | see below |
-| 10 | SITC (Supply + Installation combined rate) on BOQ import | `703b93f`, `cb48811` · `boq.py`, `boqimport.py`, `proforma.py` | M–L | see below |
+| 6 | Round-off to the rupee, a per-document tick, on by default | `09a028b`, `0cee4d4`, `d2e3234` · `roundoff.py` + every money module | M | **deferred** |
+| 7 | Project page: documents follow their BOQ (latest revision only), labour cost, cost pie + progress bars, planned vs actual margin | `a6ab6c4`, `19dc55d`, `7f2fd07`, `7308d26`, `456c980`, `e793dfa`, `9edba90`, `4f1360f`, `2df435e` · `pnl.py`, `pnl_chart.py`, `projtag.py`, `projectview.py` | L | **ported (lean)** |
+| 8 | Labour attendance workbook import + payslips + pay ledger | `de9d757`, `078e1e3`, `0c397c5`, `9b3ef4c`, `8dad301` · `payimport.py`, `payroll.py`, `attendance.py` | L | **deferred** |
+| 9 | BOQ revision numbered off its root (`/0019/1`, print shows `/0019`) | `1eb36ca` · `boq.py`, `series.py`, `pipeline.py` | M | **deferred** |
+| 10 | SITC (Supply + Installation combined rate) on BOQ import | `703b93f`, `cb48811` · `boq.py`, `boqimport.py`, `proforma.py` | M–L | **deferred** |
 
 The status column is filled in under **Outcome** at the foot of this file, one
 paragraph per row, so the reason travels with the verdict.
@@ -144,3 +144,33 @@ schedule and the challan cap stay hard.
 **5 — deferred: not on origin.** The work exists only on the live server and
 was never pushed to Demo_Works, so it is not at `e1ac14f`. Sample's receipts
 (amount + "allowed short") are what the demo uses.
+
+**7 — ported, lean (reimplemented; ABOUT.md §2o).** A Profit & Loss panel on
+the project page: contract and planned cost from the current revision's base
+rates, billed, received, still owed, committed orders, expenses and site
+labour, planned vs actual margin, a cost-split donut and progress bars. The
+BOQ panel lists the latest revision only, and an RA-bills table was added.
+**This reverses the product's C6 block, by the product owner's decision** (the
+brief); PROGRESS.md C6 is BUILT. Not ported: hand-attaching loose documents,
+the waterfall and spider charts, labour estimate-then-actual (it needs
+payslips, item 8), and the client line's coverage rules.
+
+**6 — deferred (M–L here).** Sample keeps paise; the RA bill and the merged RA
+already carry a `rounding_off` line that reconciles paise, with no tick. The
+per-document tick (on by default) touches every money module's form, totals
+and print (≈900 lines across ten modules in the client line) and would move
+most print goldens. Not attempted in this pass: P0 and item 7 came first.
+
+**8 — deferred (L).** The workbook import, the payslip and the pay ledger are
+three new modules (≈2,900 lines) plus new attendance statuses. Sample's
+attendance (marking, day rates, overtime, per-project labour cost) is what the
+demo shows; payslips are on DEMO_SCRIPT.md's "don't promise" list.
+
+**9 — deferred (M).** Numbering a revision off its root (`/0019/1`, printed
+`/0019`) changes the BOQ minter and the series scan in `series.py`, whose
+floors and Rule 46(b) behaviour are test-pinned. Not attempted for time; the
+demo shows rev 0 and rev 1 with their own numbers and the "Revision" field.
+
+**10 — deferred (M–L).** The SITC rate basis changes the BOQ import's column
+mapping and the BOQ's rate model, plus the PI/TI leg heading that depends on
+item 4a. Not attempted for time.

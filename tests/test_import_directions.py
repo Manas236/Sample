@@ -720,6 +720,19 @@ FORBIDDEN = [
     ("boqexcess", 'flask'   , "any", 'it owns no route'),
     ("boqexcess", 'quotation', "any", 'the frozen file'),
 
+    # `pnl.py` (27 November 2026): the project P&L. A leaf — it reads the
+    # collections raw so that boq, ra and purchase need not meet in one
+    # importer; projectview renders it and passes site labour in.
+    ("pnl", 'boq', "any", "it reads STORE['boqs'] raw"),
+    ("pnl", 'ra', "any", "it reads STORE['ra_bills'] raw"),
+    ("pnl", 'purchase', "any", 'the buy side reaches it only as stored records'),
+    ("pnl", 'attendance', "any", 'labour is passed IN; wages never leave attendance.py'),
+    ("pnl", 'projectview', "any", 'projectview imports THIS module'),
+    ("pnl", 'settings', "any", 'nothing to configure'),
+    ("pnl", 'chrome', "any", 'it builds no page'),
+    ("pnl", 'flask', "any", 'it owns no route'),
+    ("pnl", 'quotation', "any", 'the frozen file'),
+
     # The other direction: the printed sheet may not depend on the shell.
     # `docsheet.py` reads `BASE_STYLES` through `dashboard.py`'s re-export,
     # deliberately, and says so at the import.
