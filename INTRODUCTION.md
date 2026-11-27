@@ -1,0 +1,666 @@
+# INTRODUCTION — read this first
+
+> **This file owns:** what the system is, who it serves, the two chains, the
+> document map, the reading order, the working protocol, and the forbidden list.
+>
+> **This file does not own:** the business domain (→ [DOMAIN.md](DOMAIN.md)),
+> current phase state or the work queue (→ [STATE.md](STATE.md)), or anything
+> architectural — module map, import directions, record shapes, per-page
+> behaviour, conventions (→ [ABOUT.md](ABOUT.md)).
+>
+> Every fact in this repository has exactly one home. Where this file needs a
+> fact it does not own, it links. If you find yourself about to restate a rule
+> here that is written down elsewhere, link to it instead.
+
+---
+
+## 1. What this is
+
+A **white-label Flask quotation, schedule and billing system for a
+project contractor** in India — any trade that supplies and installs work
+against a priced schedule (civil, electrical, plumbing, fire protection, HVAC).
+Not an AMC business and not a counter-sales shop: the work is project jobs,
+executed over months and billed to a **main contractor** as it is completed.
+The company's identity, logo, document prefix and landing page are set on
+/settings; nothing company-specific ships in code. The bundled demo is a
+fictional company, written by `tools/seed_demo.py`.
+
+It is a **seller-side** application throughout. We write the schedule, we issue
+the documents, we submit the claims. The customer sends *us* their purchase
+order; we never issue one to a customer. The one place that inverts is
+`purchase.py`, which is us buying from a vendor — see §3.
+
+The stack is Flask, MySQL, roughly 12,000 lines of Python, no front-end build,
+no ORM, no template files. That last part is not an accident and is not
+technical debt; [ABOUT.md §1](ABOUT.md) explains why, and it is the single
+thing most likely to break a page if you forget it.
+
+---
+
+## 2. Who it serves
+
+| | |
+|---|---|
+| **The operator** | the company's own office staff — a small number of authenticated internal users. They author BOQs, enter site measurements as claims, and print what goes out. |
+| **The recipient** | The **main contractor**, who receives the claim, certifies some or all of it, and pays. |
+| **The end client** | The project owner. Named on the documents; never a user of this system. |
+
+The operator is not an accountant and not a developer. A rule this system
+enforces has to state its reason on the page, in words, at the moment it
+fires — an error that says only "invalid" costs somebody an afternoon.
+
+---
+
+## 3. The two chains
+
+There are two **sell-side** chains, and they are separate records end to end —
+not two render modes of one document.
+
+```
+CHAIN 1   quotation ──► proforma invoice ──► tax invoice
+          goods, offered and then invoiced in lots
+
+CHAIN 2   BOQ ──► RA bill 1 ──► RA bill 2 ──► …
+          a project, priced once and billed progressively as it is built
+            │            │
+            │            └──► receipt, receipt, …
+            │                 money actually received against a bill
+            │
+            ├──► draft PO, draft PO, …    sent to a supplier to be priced
+            └──► challan, challan, …      goods leaving the yard
+
+BUY SIDE  purchase order ──► [vendor lifecycle]
+          a separate pipeline; never links to a proforma or a tax invoice
+```
+
+⚠ **The draft PO and the delivery challan hang off the BOQ, not off an RA
+bill.** A challan in particular sits *beside* the bill and is deliberately not
+reconciled with it: one records goods moved, the other money claimed, and they
+legitimately disagree at any moment. [ABOUT.md §5](ABOUT.md) (`/dc`) and §7
+gap 19.
+
+**Chain 1** sells things. A quotation offers goods at a price; a proforma
+requests money against it; a tax invoice records the supply. Each link freezes a
+copy of the line items at the moment it is issued.
+
+**Chain 2** bills work. A **BOQ** — bill of quantities — is the priced schedule
+of one project, one to two hundred lines. An **RA bill** — running account — is
+a claim against that schedule: how much of each approved line was executed this
+period. There are typically nine or more against one BOQ.
+
+They are separate chains because the unit of progress differs. Chain 1's unit is
+a document; Chain 2's is **a quantity on a line**, and no field on a quotation
+can carry that. [DOMAIN.md](DOMAIN.md) is the full explanation and is the most
+important file in this set — read it before you touch `boq.py` or `ra.py`.
+
+**Your work is in Chain 2.** Chain 1 is older code, it is where the two
+forbidden files live (§7), and nothing you are asked to build needs to reach
+into it.
+
+The two chains do share a toolkit — the A4 sheet, the money formatters, the
+stylesheet — imported strictly one way. [ABOUT.md §2b](ABOUT.md) has the arrows,
+and [tests/test_import_directions.py](tests/test_import_directions.py) fails if
+you reverse one.
+
+---
+
+## 4. The document map — where each fact lives
+
+Read in this order. Do not skip ABOUT.md because it is long; skim §5 by section
+heading and read the rest.
+
+| # | File | Owns | Explicitly does not own |
+|---|---|---|---|
+| 1 | **INTRODUCTION.md** (this) | Orientation, doc map, working protocol, forbidden list | Domain rules, phase state, architecture |
+| 2 | **[DOMAIN.md](DOMAIN.md)** | The business, in plain language. BOQ structure, item numbering, areas, the supply/installation split, RA billing, legs, cumulative claims, certification, the tax-invoice requirement, and the imperfect-data principle | Anything about code |
+| 3 | **[STATE.md](STATE.md)** | What each Phase 4 step shipped, what is open, what is next, in order | Why a rule exists — that is DOMAIN.md |
+| 4 | **[ABOUT.md](ABOUT.md)** | **The architecture.** Module map, import graph, every record shape, persistence, per-page behaviour, branding, code-level gaps, conventions | The business reasoning; the forward queue |
+| 5 | **[CLAUDE.md](CLAUDE.md)** | The three fast facts that stop you breaking a page before you have read anything | Everything else — it points at ABOUT.md |
+| 6 | **[PHASE4_RA_DESIGN.md](PHASE4_RA_DESIGN.md)** | The approved RA billing design and the **decision record** — what was settled on 2026-08-05, what was amended, and what was left open on purpose | Current state — that is STATE.md |
+| 7 | **[CLIENT_CHANGES-2.md](CLIENT_CHANGES-2.md)** | **Phase 3 scope only** — the requirements behind users, approvals, attachments, measurement, the merged RA and labour cost, as 3A / 3B / 3C with the build order and the invariants each item has to hold. Read it before touching anything about users, approvals, attachments, measurement, the merged RA or labour cost | Phase 2 and earlier (that change log stayed with the original deployment); permission to build any of it |
+| 8 | **[fixtures/README.md](fixtures/README.md)** | The synthetic workbooks the tests read and `fixtures/build_fixtures.py` writes | — |
+| 9 | **[PROGRESS.md](PROGRESS.md)** | **Build state** of the Phase 3 feature set, one row per item, with the test figure of record | What the items *are* — that is CLIENT_CHANGES-2.md |
+| 10 | **[DEPLOY.md](DEPLOY.md)** | **How this application is put on a server** — the runtime, the MySQL grants, the process model, the runbook, the backups and the **go-live checklist**. ⚠ §6 is the specimen-data problem and §8 is the list of code changes it found and deliberately did not make; read both before a handover. Derived by reading the code, with `file:line` on every non-obvious claim | What each variable does — that is docs/ENVIRONMENT.md; anything about the domain or the architecture |
+| 11 | **[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)** | **Every environment variable the application reads**, what it defaults to, and which are mandatory in production. `tests/test_deployment_config.py` reads the AST of every root module and fails if a name is in the code and not in `.env.example`, so the list cannot silently drift | The deployment sequence — that is DEPLOY.md |
+| 12 | **[docs/ACCESS_MATRIX.md](docs/ACCESS_MATRIX.md)** | **Who can do what** — the 7 roles × 84 permissions grid (the document's own header line is the figure to trust; this one has been stale before), a plain-English paragraph per role, and a mark on **every cell** saying whether it comes from CLIENT_CHANGES-2.md or is our derivation. **Generated** by [tools/dump_access_matrix.py](tools/dump_access_matrix.py) from the live catalogue and never hand-edited; `tests/test_access_matrix_doc.py` fails if it drifts. Written to be walked through with the company's owner | The reason any permission is where it is — that is a conversation still to be had; anything about how the gate works (→ ABOUT.md §2g) |
+
+### The boundary that is easiest to get wrong
+
+**ABOUT.md §7 and STATE.md both list things that are not done.** Two lists,
+two different questions:
+
+- **ABOUT.md §7** owns gaps in **code that already exists** — the missing
+  product edit route, the escaping holes, the absence of e-invoicing. Things
+  *we* found.
+- **STATE.md** owns **work not yet started** — the ordered queue, and
+  requirements that have no code behind them at all.
+
+So: ABOUT.md §7.1 owns *which dependencies this app needs*. STATE.md owns *that
+writing `requirements.txt` is an immediate task*. Neither restates the other;
+where an item belongs on both, each entry answers its own question and links to
+the other.
+
+Many comments and test docstrings cite **`CLIENT_CHANGES.md` §0** blocks — the
+original deployment's change log of owner decisions. That log stayed with that
+deployment and is not part of this product; each citation states the rule it
+records where it is cited.
+
+### Finding your way around ABOUT.md
+
+It is 4,100-odd lines. Section headings, so you can jump:
+
+| § | What is there |
+|---|---|
+| 1 | What the app is · **the f-string / no-`/templates` rule** — read this one |
+| 2 | Module map, line counts, and the full import-direction graph |
+| 2b | **The BOQ chain** — `boq.py` and `ra.py`, and what each may import |
+| 2c | **Receipts** — `receipt.py`, and why the balance arithmetic lives upstream in `ra.py` |
+| 2d | **`docsheet.py`** — the one printed A4 sheet, why it is a leaf, and how that keeps `ra.py` and `invoice.py` apart |
+| 2e | **`boqpick.py`** — the one BOQ line picker, why it is also a leaf, and how that keeps `po_draft.py` and `challan.py` apart |
+| 2g | **`auth.py`** — the fourth bottom-of-graph module, and the only one that renders. Why access control has to sit under `dashboard.py`, the two page shells, and **why the gate is a central registry rather than a decorator** |
+| 3 | **Every record shape**, with the properties each shape exists to guarantee |
+| 4 | Persistence — how `db.py` snapshots and diffs, and how failure surfaces |
+| 5 | Page by page, route by route. `/boq` and `/ra` are the ones you need; `/client` and `/po` are the newest |
+| 6 | Branding, the settings override mechanism, the chart palette |
+| 7 | **Known gaps in existing code** — read before proposing a fix, it is probably here |
+| 8 | Two dead files. `integration.py` and `product_view_additions.py` — do not implement against either |
+| 9 | Conventions for new code |
+
+---
+
+## 5. The working protocol — mandatory
+
+This is a standing rule set, not a suggestion, and it applies to every task on
+this repository.
+
+### 5.1 Plan, then pause
+
+Before writing any code, state **what you intend to change, which files, and
+which tests will prove it**. Then stop and wait for approval.
+
+Do not combine planning and execution in one action. A plan that arrives
+alongside the diff is not a plan — it is a notification.
+
+### 5.2 Stop and report after each numbered step
+
+Work is broken into numbered steps for a reason. Finish one, report what
+happened, wait. **Do not chain steps**, even when the next one looks obvious and
+small.
+
+### 5.3 Back up the database before anything that writes to it
+
+```bash
+python tools/backup_db.py --label <what-you-are-about-to-do>
+```
+
+It reads the same `.env` the app does, so it always dumps the database the app
+is actually using; it writes to `backups/`, and it refuses to call a dump under
+100 bytes a backup ([tools/backup_db.py:51-82](tools/backup_db.py#L51-L82)).
+
+"Anything that writes to it" includes **starting the app**: `db.sync()` runs
+from `teardown_request` on every request ([ABOUT.md §4](ABOUT.md)), so a single
+page load can persist a change. Back up first, then run.
+
+### 5.4 Ask before anything destructive
+
+Deleting records, dropping or altering a column, rewriting stored JSON, running
+a migration, force-pushing — every one of these needs explicit approval before
+you start, backup or no backup.
+
+### 5.5 Never reduce the test count
+
+The baseline is **3,544 passed / 8 skipped** on 4 October 2026 (RA from a challan / a measurement sheet — previously 3,445 / 8, 3,345 / 7 and 3,307 / 6 before that), verified by
+running the suite in this configuration: openpyxl **absent** (and xlrd and defusedxml), both client workbooks **absent**, global `C:\Program Files\Python310` (CPython 3.10.11), **no `.venv`**.
+
+⚠ **On the laptop this was last measured on a `.venv` DOES exist**, and the row still means what it says: the figure is the one the **global interpreter** produces, with the `.venv` nowhere on `sys.path`. The second row below is the same checkout run through `.venv\Scripts\python`.
+
+*(**1 October 2026 — a customer's cost sheet**: the BOQ import reads a sheet priced at our own cost (base rate + markup as escalation), "RO" as a rate-only line, group labels inside an item, and stops at a recognised grand total. CLIENT_CHANGES.md §0 **thirty-ninth** block: **no bar moved and no CC-2 item changed state** — **+100 passed and +1 skipped** here, from **3,345 / 7** measured at `e7fb470` on the laptop's global interpreter: `tests/test_boq_import_cost.py` (**101**, new, built on `sheetimport.from_rows()` so it needs no workbook reader) but for its one real-workbook test, which skips inside the function. In the `.venv`, **3,563 / 7** from a measured **3,465 / 7** (+101, and −3 in `tests/test_boq_import.py`). ⚠ **No print golden and no page golden moved**; `docs/ACCESS_MATRIX.md` did not move. ⚠ **`quotation.py` and `product.py` were not edited.** The thirty-eighth block's own +38 / +1 (3,307 / 6 → 3,345 / 7, `tests/test_boq_child_context.py`) moved this figure without a note here.)*
+
+*(**30 September 2026, later — the BOQ import's structure, totals and guided fix**, CLIENT_CHANGES.md §0 **thirty-seventh** block: **no bar moved and no CC-2 item changed state** — **+0 passed and +1 skipped** in this configuration: `tests/test_boq_import_guided.py` (**40** tests, new) is one module-level `importorskip("openpyxl")` skip here. ⚠ **Measured on the OFFICE PC, not the laptop**: CPython 3.14.3 system interpreter with openpyxl, xlrd and defusedxml BLOCKED from importing by a `PYTHONPATH` shim of three packages that raise `ImportError`, and both workbooks moved aside for the run. The start-of-pass figure was measured the same way at `c341b0a` — **3,307 / 5**, matching the recorded figure exactly, which is the evidence the shim reproduces the configuration. 3,307 / 5 → 3,307 / 6. No golden moved; `docs/ACCESS_MATRIX.md` did not move.)* *(**30 September 2026** — **copy labels, the joint measurement sheet's print layout, and its typed sign-off**. The DC, TI, RA and merged RA print every statutory copy by default; the joint sheet fits a landscape page (and a phone's portrait one) instead of running off it; its sign-off names are typed and saved. CLIENT_CHANGES.md §0 **thirty-sixth** block: **no bar moved and no CC-2 item changed state** — added **110 passed and 0 skipped** here and in the `.venv` alike (**3,386 / 7**, from a re-measured **3,276 / 7**): **+73** `tests/test_copies.py`, **+19** `tests/test_measurement_layout.py`, **+16** `tests/test_measurement_signoff.py` (all new), **+1** `tests/test_print_golden.py` and **+1** `tests/test_import_directions.py`. It read **3,197 / 5** at the start of the pass, re-measured and matching. ⚠ **Four print goldens re-baselined, declared** (TI, RA, merged RA, DC) and the joint measurement sheet pinned for the first time; every other print and page golden is byte-identical. ⚠ **`quotation.py` and `product.py` were not edited**; `docs/ACCESS_MATRIX.md` did not move.)*
+
+*(**29 September 2026, later** — **GSTIN auto-fill** on the address book: type a GSTIN, the GST portal's CAPTCHA appears inside the form and is typed by the human, and the form fills — nothing saved until Save. CLIENT_CHANGES.md §0 **thirty-fifth** block: **no bar moved and no CC-2 item changed state** — added **109 passed and 0 skipped** here and in the `.venv` alike (**3,276 / 7**, from a re-measured **3,167 / 7**): **+103** `tests/test_gst_lookup.py` (new — it needs no workbook reader, so it counts in both configurations), **+6** `tests/test_import_directions.py` (the `gst_lookup.py` leaf, four `FORBIDDEN` rows and the `address → gst_lookup` arrow). The start figure here was re-measured in a clean worktree of `66f4f6b` — **3,086 / 7**, the two extra skips being `tests/test_env_isolation.py`'s, which skip in a checkout with no `.env` — and reconciles to **3,088 / 5**. ⚠ **No print golden and no page golden moved**; `docs/ACCESS_MATRIX.md` moved by four endpoints under the existing `address.create` / `address.edit` (135 → 139). ⚠ **`quotation.py` and `product.py` were not edited, and no dependency was added** — the portal is reached with `urllib`.)*
+
+*(**29 September 2026** — **Import BOQ from Excel v1**: upload the client's own workbook, confirm a column mapping, and `/boq/create` opens prefilled — nothing saved until Create BOQ. New chargeable scope outside the scope document, CLIENT_CHANGES.md §0 **thirty-fourth** block: **no bar moved and no CC-2 item changed state** — added **6 passed and 1 skipped** here, and **84 passed and 1 skipped** in the `.venv` (**3,167 / 7**, from a re-measured **3,083 / 6**). Here the +6 are `tests/test_import_directions.py`'s AST checks for the new leaf `sheetimport.py` and the `boq ↛ boqimport` arrow, and the +1 is `tests/test_boq_import.py`'s module-level `importorskip("openpyxl")` — **one** skip standing for 78 uncollected tests, the mechanism the paragraph near the foot of this section describes. It read **3,082 / 4** at the start of the pass, re-measured and matching. ⚠ **No golden moved**; `docs/ACCESS_MATRIX.md` moved by three endpoints under the existing `boq.create` (132 → 135). ⚠ **`quotation.py` and `product.py` were not edited.** ⚠ **openpyxl, xlrd and defusedxml are RUNTIME pins in `requirements.txt` from this pass**, imported lazily, so this configuration still boots and passes with none of them.)*
+
+*(**27 September 2026** — an Owner renames a login from `/users/edit` with an append-only trail, two tests that could only pass on the box they were written on, and the photo upload row. The owner's own decision, CLIENT_CHANGES.md §0 **thirty-third** block: **no bar moved and no CC-2 item changed state** — added **63 passed and 0 skipped**. **+55** `tests/test_username_rename.py` (new), **+7** `tests/test_profile_photo.py` (30 → 36 — 6 for the upload row, and **+1 that had never been able to RUN on Windows**), **+1** `tests/test_wsgi_single_worker.py` (the lock-acquire control). ⚠ **It read 3,019 / 4 and 3,020 / 6 at the start of the pass, MEASURED, and 30 above the 2,989 / 2,990 recorded here** — the 26 September profile-photo commits `911ff9c` and `4819bf9` added `tests/test_profile_photo.py` (**30**) and **+1** row in `tests/test_import_directions.py` for the new leaf `photo.py`, and moved no figure in any of the four documents. Of those 31, **29 passed and one could not run**: its parameter is 65,560 characters, pytest builds the case id from it, and `PYTEST_CURRENT_TEST` is capped at 32,767 on Windows — which is the 2 errors every Windows run of this suite has reported since, and why the figures below are the first with **0 errors** in them. 2,989 + 30 = 3,019; 3,019 + 63 = 3,082, and the `.venv` configuration reads **3,083 / 6** from a re-measured 3,020 / 6. ⚠ **No golden moved, of any kind** — `/account` and `/users/edit` are pinned by none, and `docs/ACCESS_MATRIX.md` was regenerated and is byte-identical: no endpoint and no permission were added.)*
+
+*(**25 September 2026** — the PRE-HANDOVER pass: demo data OFF by default (§7 gap 35), a settable starting-number FLOOR per statutory series (§7 gap 36), and the suite cut loose from the checkout's `.env`. The owner's own decision, CLIENT_CHANGES.md §0 **thirty-first** block: **no bar moved and no CC-2 item changed state** — added **142 passed and 2 skipped**. **+28** `tests/test_demo_data_flag.py` (new), **+19** `tests/test_print_golden.py` (the blank-identity sweep over all nine print routes; the 2 new skips are by design — a challan and a measurement sheet carry no statutory identity block), **+59** `tests/test_series_floors.py` (new), **+31** rows `tests/test_import_directions.py` for the leaf `series.py`, **+7** `tests/test_env_isolation.py` (new). It read **2,847 / 2** at the start of the pass, re-measured and matching. 2,847 + 142 = 2,989; the `.venv` configuration reads **2,990 / 6**, from a re-measured **2,848 / 4**. ⚠ **One golden moved and no PRINT golden did** — `tests/test_page_golden.py`'s `settings` row, `main` alone, +5,560 bytes, **27 lines added and 0 removed**, re-baselined in item B's own commit because a gap that can only be closed by putting a control on a page cannot be closed without moving that page's digest.)*
+
+*(**23 September 2026** — the universal delete rollout, Owner-only, with the third narrow unfreeze of `quotation.py`; **+42**, taking 2,805 → 2,847 and the `.venv` 2,806 → 2,848. This note was not written in that pass and is reconstructed here from PROGRESS.md's header, which did carry it.)*
+
+*(**22 September 2026** — the identity pages stop offering what they then refuse: signed in as a Director, `/users/create` drew the **Owner** role and then refused the save, ABOUT.md §2g and §5 `/users`; **+15** in `tests/test_identity_offers.py` (new — the role picker on both forms, the register's per-row links, the Roles button, each hiding paired with its control). A UX defect fix on built Phase 3B work, and **no guard was changed or weakened**: **no bar moved and no CC-2 item changed state** — added **15 passed and 0 skipped**. It read **2,790 / 2** at the start of the pass, re-measured and matching. 2,790 + 15 = 2,805; the `.venv` configuration reads **2,806 / 4**, from a re-measured **2,791 / 4**.)*
+
+*(**20 September 2026** — the BOQ sheet fits a portrait page: a phone's print service picks the paper, and Chrome for Android scaled the landscape page box onto it, ABOUT.md §5 `/boq`; **+4** in `tests/test_boq.py` (*The sheet on a portrait page*). A defect fix on an existing document: **no bar moved and no CC-2 item changed state** — added **4 passed and 0 skipped**. It read **2,786 / 2** at the start of the pass, re-measured — ⚠ **94 above the 2,692 recorded here**, because the seven commits `0c493e1` … `5f4ddc0` of 14–15 September added 94 across 17 test files and moved no figure in any document. 2,786 + 4 = 2,790; the `.venv` configuration reads **2,791 / 4**, from a re-measured **2,787 / 4**.)*
+
+*(The third change of **14 September 2026** — the placeholder mark narrowed to the server fill — *"if I have entered price it is not a placeholder"*, ABOUT.md §5 `/purchase`; **+5** in `tests/test_po_extra_lines.py` §6 (52 → 57), four rewritten. The owner's own ruling, recorded in CLIENT_CHANGES.md §0's twenty-ninth block: **no bar moved and no CC-2 item changed state** — added **5 passed and 0 skipped**. 2,687 + 5 = 2,692; the `.venv` configuration reads **2,693 / 4**, from a re-measured **2,688 / 4**.)*
+
+*(The second change of **14 September 2026** — the two PO repeaters on the upstream forms and the reprice form's Amount column, ABOUT.md §5 `/purchase`; **+27** in `tests/test_po_upstream_repeaters.py` (new — 20 for the repeaters and the Amount column, 7 for the extra-part HSN box, which also moved the PO print golden by +66 stylesheet bytes). The owner's own decision, CLIENT_CHANGES.md §0 twenty-ninth block: **no bar moved and no CC-2 item changed state** — added **27 passed and 0 skipped**. 2,660 + 27 = 2,687; the `.venv` configuration reads **2,688 / 4**, from a re-measured **2,661 / 4**.)*
+
+*(The pass of **14 September 2026** — the BOQ editor quantifies a new line at 1, ABOUT.md §5 `/boq`; **+6** in `tests/test_editor_nav.py` (27 → 33). UX only: **no bar moved and no CC-2 item changed state** — added **6 passed and 0 skipped**. 2,654 + 6 = 2,660; the `.venv` configuration reads **2,661 / 4**, from a re-measured **2,655 / 4**.)*
+
+*(The pass of **13 September 2026** — the BOQ line panel rearranged into four
+bands and a fold (ABOUT.md §5 `/boq`) — added **4 passed and 0 skipped**, all
+in `tests/test_editor_nav.py` (23 → 27), and is **UX only: no bar moved and no
+CC-2 item changed state**. 2,650 + 4 = 2,654; the `.venv` configuration reads
+**2,655 / 4**, from a re-measured **2,651 / 4**.)*
+
+*(The pass of **12 September 2026** — the quotation source following the
+catalogue switch, Supply only, gap 38 closed and the approval ladder switched
+off in code — added **218 passed and 0 skipped**, reconciling per change and
+per file: `tests/test_quotation_switch.py` (**18**, new), `tests/test_escaping.py`
+(**+2**), `tests/test_import_directions.py` (**+12**), `tests/test_quotation_spec_picker.py`
+(**+7**), `tests/test_po_gap38.py` (**28**, new), `tests/test_approvals_off.py`
+(**148**, new), `tests/test_approval_grandfather.py` (**+3**). 18+2+12+7+28+148+3
+= **218** — and moved **no bar**. It read **2,432 / 2** at the start of that
+pass, re-measured and matching. 2,432 + 218 = 2,650.)*
+
+*(The pass of **11 September 2026** — the catalogue hidden behind a toggle and
+the quotation written from the spec library — added **88 passed and 0
+skipped**: `tests/test_product_hidden.py` (**40**, new) and
+`tests/test_quotation_spec_picker.py` (**48**, new, ten of them running the
+page's JavaScript under Node). 40+48 = **88** — and moved **no bar**. ⚠ It
+read **2,344 / 2** at the start of that pass, **measured, and 61 above the
+2,283 the documents recorded**: the 10 September commit `1d7725a` added
+`tests/test_editor_nav.py` and moved no figure in any document. The pass held
+itself to the measured baseline, not the quoted one. 2,344 + 88 = 2,432.)*
+
+*(The **SEVENTEENTH** pass, 9 September 2026, added **48 passed and 0 skipped** — two new files, `tests/test_boq_project_link.py` (**17**) and `tests/test_qty_float_precision.py` (**31**). 17+31 = **48** — and moved **no bar**: ABOUT.md §7 gap 33 is a defect fix against **F.04** of the Phase 3 quotation §3, and §7 gap 34 is a float audit that **changed no code at all**. It read **2,235 / 2** at the start of that pass, re-measured rather than quoted, matching the sixteenth exactly.)*
+
+*(The **FIFTEENTH** pass, 6 September 2026, added **123 passed and 0 skipped** — `tests/test_e2e_chain_helpers.py` (**63**), `tests/test_measurement_joint.py` (**42**), `tests/test_measurement_grid_backfill.py` (**13**), `tests/test_print_golden.py` (**+5**, 11 → 16) and `tests/test_import_directions.py` (**net 0** — one new test, one parametrised `FORBIDDEN` row removed). 63+42+13+5+0 = **123** — and moved **no bar**: an end-to-end HTTP chain driver and a redrawn measurement sheet touch none of CC-2's twenty items. It read **2,081 / 2** at the start of that pass, re-measured rather than quoted, matching the fourteenth exactly.)*
+
+*(The **FOURTEENTH** pass, 5 September 2026, added **47 passed and 0 skipped** in one new file — `tests/test_dashboard_boq_ra.py`, the dashboard's BOQ/RA visual cues — and moved **no bar**. It read **2,034 / 2** at the start of that pass, re-measured rather than quoted, matching the thirteenth exactly.)*
+
+*(The **ELEVENTH** pass, 30 August 2026, added **30 passed and 0 skipped** and
+moved **no bar**: `tests/test_backfill_marking_projects.py` (15, the
+marking→project backfill — that it **never guesses** above all, with the
+tie-breaks somebody will be tempted to add named so that adding either goes
+red), plus **+14** in `tests/test_attendance.py` (the project field, the
+filtered picker's three rules, the cross-site mutation, and the two Site Labour
+groups summed apart) and **+1** parametrised case in
+`tests/test_import_directions.py` (`attendance → project`, refused for the
+reason `charge → project` already is). 15+14+1 = 30. ⚠ **None of it is a CC-2
+item** — C5's five bullets name no project — and all of it is registered in
+PROGRESS.md §4c, rows 22–24. ⚠ **Not one print golden moved**, and
+`docs/ACCESS_MATRIX.md` did not move either: no permission was minted and no
+route was added.)*
+
+*(The **TENTH** pass, 30 August 2026, added **50 passed and 0 skipped** and
+moved **no bar**: `tests/test_clean_site_data.py` (20, the live-data cleanup —
+the orphan refusal above all), `tests/test_seed_demo_scenario.py` (16, the demo
+tool and its purge exactness), plus **+10** in `tests/test_attendance.py` (the
+Site Labour section, its B4 permission wall and its empty states), **+2** in
+`tests/test_site_picker.py` (the unmapped-marker separation defect and its
+mutation) and **+2** parametrised cases in `tests/test_import_directions.py`.
+20+16+10+2+2 = 50.)*
+
+*(The **ninth** pass, 30 August 2026, added **92 passed and 0 skipped** and
+moved **no bar**: `tests/test_address_guards.py` (42, the address book as a
+master — references, the delete refusal, the archive, the edit log, the `type`
+lock), `tests/test_project_site.py` (24, a project's site as an address-book
+link) and `tests/test_project_site_backfill.py` (21, driving the real migration
+in process), plus **+1** in `tests/test_site_picker.py` and **+4** parametrised
+cases in `tests/test_import_directions.py`. ⚠ **Neither half is a CC-2 item** —
+both are registered in PROGRESS.md §4c, rows 16–18. ⚠ **Not one print golden
+moved**, and `docs/ACCESS_MATRIX.md` moved by three classified endpoints with
+**no permission minted**. The baseline it moved from, **1,755 / 2**, was
+re-measured at the start of the pass rather than quoted, and matched.)*
+
+*(The **eighth** pass, 30 August 2026, added **72** and corrected two delivered
+items rather than delivering one: the day rate, the site picker and the two
+register screens.)*
+
+*(The **fourth** 29 August pass added **67 passed and 0 skipped**, moving the
+board 13 → 15 and 3B from 5/8 to 7/8: `tests/test_approval.py` (24, **B6** — the
+approval ladder and the creator guard), `tests/test_approval_grandfather.py`
+(10, the pin that keeps the grandfathered set closed),
+`tests/test_approval_b7.py` (24, **B7** — an unapproved document may be viewed
+but not printed) and `tests/test_doc_figures.py` (9, which is what now holds
+these four documents in step). ⚠ **Not one print golden moved**, which was the
+condition the pass was given.)*
+
+*(The **third** 29 August pass added **77 passed and 1 skipped**, moving the
+board 12 → 13: `tests/test_attendance.py` (33, **C5** — attendance and
+site-wise labour cost), `tests/test_nav_reachability.py` (30, of which one skips
+— the navigation re-baseline and the reachability sweep) and
+`tests/test_po_parts_aliases.py` (15, the `po_parts.py` alias cutback).
+`tests/test_employee.py` stays at 34: one test was **deleted** exactly as its
+own docstring instructed, and one added in its place. ⚠ **Five print goldens
+moved on purpose**, +248 bytes each, in the `head` block alone, and nothing on
+any printed sheet changed.)*
+
+*(The **second** 29 August pass added **20** and built no feature; it measured
+1,387 / 1 here and that figure never reached this file — the staleness is
+recorded rather than quietly corrected.)*
+
+*(The 29 August pass opened Phase 3C and added **92**: `tests/test_employee.py`
+(34) and `tests/test_po_extra_lines.py` (33) are new, and
+`tests/test_import_directions.py` went 231 → 256 for the two new modules' import
+arrows. It built **C4**, the employee master, and **extra free-text
+purchase-order lines** — the latter ⚠ **not one of CC-2's twenty items** and
+priced in neither quotation; see PROGRESS.md §4a.)*
+
+*(The 28 August pass ([STATE.md §1.18](STATE.md)) closed Phase 3A and added
+**50**: `tests/test_po_charges.py` (25) and `tests/test_ra_edit_delete.py` (11)
+are new, `tests/test_po_rate_edit.py` went 21 → 32 and
+`tests/test_receipt_write_off.py` 21 → 24. **Five existing tests were
+deliberately retargeted in that pass and none was deleted** — four pinned A1's
+Draft-only narrowing, which was lifted, and one was a tripwire written to fail
+when its defect was fixed. Every one keeps its old assertion verbatim in a
+comment; see §5.5's rule below on what makes that legitimate. The 27 August
+day's four passes took it **1,058 → 1,062 → 1,151 → 1,225**. The last of
+them is the **Phase 3A document** pass ([STATE.md §1.17](STATE.md)), which added
+**74** in four files: `tests/test_po_discount.py` (22),
+`tests/test_po_rate_edit.py` (21), `tests/test_receipt_write_off.py` (21) and
+`tests/test_client_outstanding.py` (10). Before it, the escalation / sign-out /
+navigation pass added 89 — `tests/test_privilege_escalation.py` (17),
+`tests/test_nav_user_chip.py` (23), `tests/test_nav_visibility.py` (49) — and
+break-glass recovery added 4 over `tools/set_password.py`. Earlier: **986 / 1**
+on 26 August 2026, **923 / 1** on 23 August, **838 / 1** on 16 August, all in
+the same configuration. Every figure was re-measured at the start of the pass
+that moved it rather than quoted, and every one matched.)*
+
+⚠ **The purchase-order golden was re-baselined TWICE on 28 August 2026, by the
+pass that closed Phase 3A — and both times the movement was the work.** It moved
+**+1,021 bytes** for **A1** (939 of `.po-reprice` stylesheet, plus an 82-byte
+`Reprice` anchor that the **Issued** golden order qualifies for now the
+Draft-only narrowing is lifted) and **+937 bytes** for **A3** (all of it
+`.chg-*` stylesheet for the charge repeater). **Both moved the `head` block and
+nothing else** — and `head` runs from `<head>` to the letterhead, so it carries
+the stylesheet, the nav and the screen action bar, not just the `<head>`
+element. `letterhead`, `foot-strip`, `doc-box`, `party`, `items` and `signature`
+are byte-identical through both. **Not one figure on the printed sheet moved**:
+the golden order carries no charges and has never been repriced, so no charge
+row and no `Rate changes` panel render and `taxable_value` falls back to
+`subtotal`. The other six goldens did not move. Every byte is decomposed in the
+comment above the digests in `tests/test_print_golden.py`.
+
+⚠ **One print golden was re-baselined on 27 August 2026 by the Phase 3A document
+pass, and this is the second circumstance in which that is allowed.** The purchase
+order moved **+942 bytes**, in two of its seven blocks, because
+CLIENT_CHANGES-2.md **A2** added a discount column to the buy sheet — head +721
+of CSS, items +221 of cells. **The change was the work, not a side effect**, and
+every byte is decomposed in the comment above the digests in
+`tests/test_print_golden.py`. **No figure on the sheet moved**: the golden PO
+carries no discount, so its new column prints an em dash and its Order Value is
+unchanged at 307,508.00. The quotation, proforma, tax invoice, RA bill, delivery
+challan and `/po/create` goldens did **not** move — that separation is what
+`docsheet.BUY_COLUMNS` and the `.c-disc` rule's placement in `PURCHASE_STYLES`
+exist to hold.
+
+*(The first circumstance, still the more common one: **five goldens were
+re-baselined earlier on 27 August 2026**, by +8 bytes each and in two blocks
+only — the letterhead and the footer. The whole difference was the `&` in the
+company tagline now being written `&amp;`, which a browser draws identically;
+no rendered figure moved there either.)*
+
+**In both cases the rule is the same and it is not "the suite is red, update
+the number":** you may re-baseline only when you can say **which field moved,
+by how many bytes, and why** — in writing, beside the digest, in the same
+commit as the change.
+
+**The supported configuration is measured too:** the repo's `.venv` (CPython
+3.10.11, **openpyxl 3.1.5 present**, both workbooks absent) reports **1,226 passed
+/ 3 skipped**, measured 27 August 2026 against the same commit. It read
+**1,152 / 3** against the pre-pass code, measured the same day.
+
+*(⚠ **This paragraph used to say that row was "derived". It was wrong.**
+ABOUT.md §1 has recorded row 2 as **measured on 23 August 2026** since that
+date; this file went on describing it as derived, which is the same
+documentation drift §5.5 exists to warn about, pointing the wrong way. Corrected
+26 August 2026 after re-running it and getting ABOUT.md's figure back.)*
+
+The +1 pass and +2 skips over the global figure are the whole of the openpyxl
+difference: `tests/test_fixtures.py` holds its 4 tests behind a **module-level**
+`pytest.importorskip("openpyxl")`. Without openpyxl the module fails at
+**collection** and pytest prints **1 skipped** for all four; with it the module
+collects and the individual skips appear. One skip standing for four uncollected
+tests is the thing most often got wrong about this suite.
+
+⚠ **From 29 September 2026 the difference is +79 passed and +2 skipped**, and it
+is the same mechanism a second time: `tests/test_boq_import.py` needs openpyxl
+to build its in-memory workbooks and skips at module level without it — one
+skip for 78 tests. With openpyxl its 78 pass and one more (the workbook
+reproduction) skips on the absent workbook. 1 + 78 = 79. ABOUT.md §1 holds the
+relationship.
+
+⚠ **The third configuration — *openpyxl present, workbooks present* — has never
+been measured**, and [ABOUT.md §1](ABOUT.md) row 1 marks it **unknown** rather
+than guessing. This box has openpyxl but neither `demo_boq.xlsx` nor
+`annexure.xlsx`. A count nobody ran is a claim, not a result: if you are on a box
+that has the workbooks, run it and put the measured figure in.
+
+**Always state which of the three you ran.** A count on its own is not a
+result: the three move independently, and one pass reported "607 to 630" and
+"638 passing" without naming a configuration for either.
+[ABOUT.md §1](ABOUT.md) has the table and explains why the two mechanisms are
+different — a module-level `importorskip` reports **one** skip however many
+tests sit behind it, which is the thing most often got wrong about this suite.
+
+If your first run reports something outside those three, stop and say so before
+making a change.
+
+Run before and after every change, and **report both numbers**:
+
+```bash
+.venv\Scripts\python -m pytest -q      # Windows
+```
+
+If a test is genuinely wrong, **say why and wait**. Deleting or weakening a failing test is never the fix — several
+tests in this suite are deliberate controls that exist to prove another test
+can actually fail, and they look redundant until you understand what they pin.
+
+### 5.6 When code and a document disagree, the code is right
+
+These documents record decisions and constraints. They can go stale. Where a
+document says a function behaves one way and the function behaves another,
+**the code is authoritative — report the drift, do not edit the code to match
+the prose.**
+
+The exception is a requirement explicitly marked as *not yet implemented*.
+Those are written down precisely because the code does not do them yet.
+
+### 5.7 Environment
+
+`requirements.txt` **is committed and pinned**, and a **`.venv` is the
+supported way to run this repo** — not a system interpreter, which the pins
+would downgrade. **Supported: CPython 3.10 to 3.14**, last verified on 3.14.3
+(Windows). The dependency *set* is derived from the actual imports rather than
+a `pip freeze`; [ABOUT.md §1](ABOUT.md) has the cold-start sequence and
+[ABOUT.md §7.1](ABOUT.md) owns the dependency list.
+
+⚠ **`QMS_DEMO_DATA` defaults to `false` and your `.env` should say
+`true`** (25 September 2026, [ABOUT.md §7 gap 35](ABOUT.md)). It is the one
+environment variable in this repository whose default is the **production**
+value rather than the local-dev one, because the failure that matters is a
+client box nobody configured. Without it you get **no demo products, no demo
+addresses and no demo BOQ** — which looks exactly like a broken checkout and is
+not one. `.env.example` ships `true`; `cp .env.example .env` gives you the
+demo. `tests/conftest.py` forces it on, so the suite is unaffected either way.
+
+⚠ **The suite does not read your `.env` at all.** `conftest._never_read_dotenv()`
+replaces the loader before `db` is imported, so a value there cannot turn the
+suite red or green. That is deliberate — it is what makes `python -m pytest` a
+usable check on the production box — and it means a test that needs a setting
+must set it itself, with `monkeypatch`.
+
+⚠ **[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) is the complete list** and
+[DEPLOY.md](DEPLOY.md) is the server sequence. Neither is optional reading
+before a deployment.
+
+---
+
+## 6. Three things about this codebase that will bite you first
+
+All three are covered fully in ABOUT.md. They are repeated here — as pointers,
+not explanations — only because they are what breaks on day one.
+
+1. **HTML lives in Python f-strings**, so every literal `{` and `}` in embedded
+   CSS or JavaScript must be **doubled** (`{{` / `}}`). This is the single most
+   common way to break a page here. [ABOUT.md §1](ABOUT.md).
+2. **`render_template_string` is gone from every module** and must not be
+   reintroduced anywhere. A fully-interpolated string parsed a second time
+   executes any `{{ … }}` that came from user input — and did, until
+   27 August 2026: a product named `{{ config['SECRET_KEY'] }}` printed this
+   application's signing key. [ABOUT.md §7.9d](ABOUT.md).
+3. **Escape every user-supplied value where you interpolate it**, with `P.esc`.
+   Not in a response filter — that would double-escape the deliberate markup and
+   mangle the print pages. Never escape a money or quantity format, and never
+   escape a value a helper has already escaped. [ABOUT.md §9](ABOUT.md) has the
+   full rule and [ABOUT.md §7.7](ABOUT.md) has the sinks that are easy to miss.
+
+---
+
+## 7. Files you must not refactor
+
+- **`product.py`**
+- **`quotation.py`**
+
+Both belong to Chain 1, the older sell chain. Both are **frozen against
+refactor and feature work**, and both are **out of scope for you**. Do not tidy
+them, do not restructure them, do not port a nicer pattern across from
+`spec.py`, and do not build the missing product edit route
+([ABOUT.md §7.2](ABOUT.md)) in one of them. Editing either expands the blast
+radius into code that has no test coverage for your changes, and the deferral is
+a decision that has already been taken — it is not an oversight you have
+spotted.
+
+### The one exception, and what it does not license
+
+**Narrow security fixes and route-method fixes are permitted**, and must be
+called out in the commit that makes them and in ABOUT.md. Two have now happened:
+
+- `9d060ee` (12 August 2026) closed a GET that destroyed a product.
+- **27 August 2026** escaped the unescaped output and removed the second Jinja
+  parse from both files. That was the item CLIENT_CHANGES-2.md's own "Security
+  items promoted by this phase" names, and it says in as many words that the
+  freeze "explicitly permits" it.
+
+**Two NARROW UNFREEZES of `quotation.py` have also happened, and neither is the
+exception above** — each is a dated override by the client-facing owner in
+[CLIENT_CHANGES.md §0](CLIENT_CHANGES.md), naming the functions and nothing
+else, and `tests/test_nav_user_chip.py::test_the_frozen_modules_get_the_chip_without_being_edited`
+holds the diff since `eff0034` to exactly those functions:
+
+- **29 August 2026** — `view_quotation()`, for the deal panel's Committed
+  figure (it now calls `purchase.job_cost()` rather than re-deriving one).
+- **11 September 2026** — `_product_catalog_json()`, `_process_selections()`
+  and `create_quotation()`, so a new quotation is written from the
+  specification library. The product catalogue is **hidden from everybody**
+  the same day (`auth.HIDDEN_BLUEPRINTS`, [ABOUT.md §2g](ABOUT.md)) — and
+  `product.py` was **not** edited for it: the hide lives in `auth.py`.
+- **23 September 2026** — a **THIRD narrow unfreeze**, for exactly ONE new
+  function: `delete_quotation()`, the delete route, under the **thirtieth**
+  §0 block. The one other authorised line is the button that reaches it, and
+  it sits inside `view_quotation()`, already unfrozen on 29 August — that
+  span is **not widened**. `UNFROZEN_QUOTATION_FUNCTIONS` gains one name and
+  now holds five. ⚠ The test that enforces this got **stricter** in the same
+  pass, not looser: it checks **per line** instead of per hunk (a hunk that
+  legitimately spans two adjacent unfrozen functions was unsatisfiable, and
+  blank separator lines carry no code), and a function's span now starts at
+  its first **decorator** rather than at `def`, because a route's own
+  `@quotation_bp.route(...)` is part of the function it decorates.
+- **12 September 2026** — the **same three functions, and no fourth**: the
+  product path was restored from `1d7725a` and each function now **branches
+  on the switch** (`auth.blueprint_hidden("product")`, by function-body
+  import), reaching the new leaf `specpick.py` while the catalogue is hidden
+  and rendering the `1d7725a` page **byte for byte** when it is not
+  (`tests/test_quotation_switch.py` holds a golden captured from that commit).
+  The library picker is **Supply only**.
+
+**`product.py` has never been unfrozen and still is not.** A **sixth**
+`quotation.py` function needs a sixth §0 block naming it; the test is what
+makes a quiet widening fail. ⚠ `product.py` was not edited by the delete
+rollout either: `/product/delete/<id>` already existed and gained its
+Owner-only gate through `auth.py`, the same way the catalogue hide was built.
+
+⚠ **25 September 2026 — the pre-handover pass declined to open a fifth
+carve-out, and both files are untouched.** It is recorded here because the
+temptation was real and specific, and an unopened carve-out leaves no trace in
+a diff:
+
+- **`quotation._next_ref()` gets NO starting-number floor**, although every
+  other `max+1` minter in the application got one (ABOUT.md §7 gap 36). That
+  entry itself named the freeze as the first of three blockers, and the answer
+  taken was to **accept it** rather than work around it: a quotation is an
+  offer, not a tax document — Rule 46(b) governs a tax invoice — so nothing
+  about the client's paper book depends on its number. It keeps its `len()+1`.
+  `series.py` may not import `quotation.py` and a test asserts the series is
+  absent from the registry.
+- **`product.ensure_demo_products()` is switched off WITHOUT being edited**
+  (ABOUT.md §7 gap 35). `app.disarm_frozen_demo_seeder()` pre-sets the
+  `STORE["_seeded"]` guard that function already opens with, which disarms all
+  six of its call sites including the two inside the two frozen files. Exactly
+  the "toggle from outside" the catalogue hide used on 11 September.
+
+⚠ **This section used to say these files "carry known unescaped output".** They
+no longer do — [ABOUT.md §7.7 and §7.9d](ABOUT.md) are closed. **The
+prohibition is unchanged by that**, because it was never really about the
+escaping: it is about not taking on a refactor of untested code in the older
+chain. A security fix being allowed once, and then twice, is not the freeze
+being lifted.
+
+⚠ **And do not read "the two files with the escaping problem" as the boundary
+of an escaping problem.** The 27 August enumeration found the same defect in
+fifteen other files — most importantly the company identity from `/settings`,
+which printed raw on every document's letterhead. If you are looking for a sink,
+sweep the routes; do not read these two files and stop.
+
+**Importing from them is fine and expected** — see below.
+
+**Importing from them is fine and expected.** `ra.py` imports
+`QUOTATION_STYLES` and `_inr` from `quotation.py`
+([ra.py:69](ra.py#L69)) so that the RA form is the same form as the BOQ form.
+The prohibition is on *editing* those two files, not on depending on them.
+
+**One import is prohibited as well: `quotation._tax_lines()`.** That is a
+separate rule with its own reason, and it is **not** affected by §8. It is
+document-total arithmetic branching on a `tax_type` it is handed
+([quotation.py:79-98](quotation.py#L79-L98)) — it does not decide which tax
+head applies, it has no per-line concept, and it lives in a file you may not
+edit. `ra.py` grows its own. [DOMAIN.md](DOMAIN.md) carries the full reason.
+
+---
+
+## 8. One rule in this codebase is now known to be wrong
+
+`ra.py` currently asserts, in code and in a test that reads its AST, that **an RA
+bill is not a tax invoice**. The client's real as-submitted bill arrived on
+8 August 2026 and is headed *Tax Invoice*.
+
+That assertion must be **inverted, not deleted** — and it is **not yet
+implemented**. Do not act on this section on your own initiative.
+
+**Inverting it does not unlock `quotation._tax_lines()`.** That prohibition
+(§7) rests on its own reasons and survives this change untouched. The
+assertion being inverted is the one about *what kind of document an RA bill
+is*; several of the absences the same test pins — e-invoicing among them —
+stay asserted. It is one test becoming three, not one flipped boolean.
+
+- The requirement, and everything the client's real document carries, is in
+  [DOMAIN.md](DOMAIN.md).
+- Its position in the work queue is in [STATE.md](STATE.md).
+
+---
+
+## 9. The principle underneath all of it
+
+**The client's own data is imperfect, and it must survive rather than be
+repaired.** Their real documents contain a duplicated item number, raw Excel
+date serials where dates belong, and a supplier sheet carrying the wrong state's
+GSTIN. Every guard in this system **blocks, warns or flags — it never silently
+corrects.**
+
+An agent trying to be helpful by cleaning up the client's data is the specific
+failure mode this document set exists to prevent. [DOMAIN.md](DOMAIN.md) states
+it in full, with what each of those three defects actually cost.
+
+---
+
+## 10. Where you are
+
+**Branch:** `antigravity-dev`, cut from `feature/boq-ra` at `fe629d5`.
+
+`Quote.html` is untracked in the working tree and would ride along in a
+`git add .`. Handling it is an open item in [STATE.md](STATE.md).
+
+Now read [DOMAIN.md](DOMAIN.md).

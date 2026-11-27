@@ -1,0 +1,1538 @@
+"""
+The import graph, enforced.
+
+ABOUT.md §2 documents which module may import which, and every one of those
+arrows is load-bearing: reversing one is a circular import that fails at boot,
+and the app's whole no-templates architecture depends on `dashboard.py` sitting
+at the bottom of the graph where every other module can pull `BASE_STYLES` out
+of it.
+
+ABOUT.md claimed "there is a test guarding every one of those six import
+directions". There was not — this file is that guard, written when the BOQ
+chain was added and covering the original six as well as the new ones.
+
+The check is on the module's own source, not on `sys.modules`: importing
+`quotation` pulls `proforma` into the process by way of nothing at all, but a
+transitive import through another module would still make a naive
+`sys.modules` check pass. Reading the AST asks the only question that matters —
+does THIS file contain an import of that module.
+"""
+
+import ast
+import pathlib
+
+import pytest
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def imports_of(module: str, top_level_only: bool = False) -> set:
+    """
+    Every module name imported by `module`, from its source.
+
+    `top_level_only` restricts the answer to imports that run at import time.
+    That distinction is the whole point for `dashboard.py`: it may not import
+    `product` or `address` at module level, because both import *it* — but
+    `index()` pulls the seeders in **inside the function body**, which breaks
+    the cycle and is deliberate (ABOUT.md §2). A check that could not tell the
+    two apart would report the documented design as a violation.
+    """
+    tree = ast.parse((REPO / f"{module}.py").read_text(encoding="utf8"))
+    nodes = tree.body if top_level_only else ast.walk(tree)
+    found = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                found.add(a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                found.add(node.module.split(".")[0])
+    return found
+
+
+# ── The directions ABOUT.md §2 already documented ───────────────────────────
+# `scope` is "any" when the module may not import the other at all, and
+# "module" when a deliberate in-function import is the documented escape hatch.
+FORBIDDEN = [
+    # (module, must-not-import, scope, why)
+    ("pipeline",  "quotation", "any", "pipeline.py imports nothing from the app — it is the "
+                                      "only place a helper can live without coupling the two pipelines"),
+    ("dashboard", "quotation", "any", "dashboard.py is imported BY every module; importing one back is a cycle"),
+    ("dashboard", "product",   "module", "index() imports the seeders inside the function body — "
+                                         "at module level it would be a cycle"),
+    ("dashboard", "address",   "module", "same reason"),
+    ("quotation", "proforma",  "any", "the chain imports strictly downstream; quotation links out with url_for"),
+
+    # ⚠ **`quotation` -> `purchase` is scope "module", not "any", from
+    #   29 August 2026.** The deal panel calls `purchase.job_cost()` rather than
+    #   re-deriving a second `committed` beside it, and it takes the import
+    #   INSIDE `view_quotation()` — the documented escape hatch `_shell()` uses.
+    #   At module level it is a cycle: `purchase.py` imports this module for the
+    #   document formatters. The pair is listed here so the in-function import
+    #   is a pinned decision rather than an omission from this table.
+    ("quotation", "purchase",  "module", "purchase.py imports quotation.py for the document "
+                                         "formatters, so a module-level import back is a "
+                                         "cycle. view_quotation() imports it in the function "
+                                         "body to call job_cost(), which is the one "
+                                         "definition of `committed`"),
+    ("proforma",  "invoice",   "any", "same rule, one link further down"),
+    ("purchase",  "proforma",  "any", "the buy side must never touch a sell-side money document"),
+    ("purchase",  "invoice",   "any", "a PO records input tax; an invoice records output tax"),
+    ("proforma",  "purchase",  "any", "and the sell side must never reach across either"),
+    ("invoice",   "purchase",  "any", "same"),
+
+    # ── The buy side reaches UP the BOQ chain, and no further (Pass C) ──────
+    #
+    # `/purchase/from-boq/<id>` and `/purchase/from-draft/<id>` gave the real
+    # purchase order an upstream, which is what finally puts procurement cost on
+    # a project. What it must NOT give it is a dependency on any other document
+    # module: `purchase.py` may read a schedule and render its picker, and that
+    # is the whole of it.
+    #
+    # `po_draft` is the load-bearing one and it runs both ways. The conversion
+    # route lives in `purchase.py` because it writes a `purchases` record;
+    # `po_draft.py` links to it with `url_for` and reads `converted_po_ids` off
+    # its own record. If either imported the other, two sibling document modules
+    # would be coupled for the sake of one dict lookup — which is exactly what
+    # the one-way trick between quotation/proforma, proforma/invoice,
+    # quotation/purchase, boq/ra, ra/receipt and boq/challan exists to avoid.
+    ("purchase", "po_draft", "any", "the conversion route lives in purchase.py because it "
+                                    "writes a purchases record; po_draft.py links to it by "
+                                    "URL and reads STORE['purchase_orders'] is read the "
+                                    "other way — neither imports the other"),
+    ("purchase", "ra",       "any", "an RA bill claims money IN against a schedule; a PO "
+                                    "commits money OUT. They share a BOQ and nothing else"),
+    ("purchase", "challan",  "any", "a goods-movement note is not a purchase order"),
+    ("purchase", "receipt",  "any", "a receipt is money RECEIVED — the other side of the "
+                                    "ledger entirely"),
+    ("purchase", "charge",   "any", "an employee expense is not a purchase order"),
+    ("purchase", "client",   "any", "client segregation is a sell-side ledger"),
+    ("purchase", "spec",     "any", "the BOQ already copied the clause it needs"),
+
+    # ── The BOQ chain (handover §3.4) ───────────────────────────────────────
+    ("boq", "ra",       "any", "the BOQ view page links out with url_for and reads STORE['ra_bills'] "
+                               "directly — importing ra.py back would be a cycle"),
+    ("boq", "proforma", "any", "a BOQ has no proforma; it bills through RA"),
+    ("boq", "invoice",  "any", "the RA bill carries the tax block per DOMAIN.md §4, not the BOQ — boq does not import invoice"),
+    ("boq", "purchase", "any", "a BOQ does not link to a purchase order"),
+    ("boq", "settings", "any", "settings imports quotation; nothing downstream of it may import back"),
+    ("boq", "product",  "any", "the BOQ picker reads the SPEC library. product.py serves the "
+                               "quotation chain and its base_price is not a BOQ supply rate"),
+    ("boq", "po_draft", "any", "the BOQ view page links out with url_for and reads STORE['purchase_orders'] "
+                               "directly — importing po_draft.py back would be a cycle"),
+
+    # ── Draft POs from BOQ (Phase 4 / Item 4) ───────────────────────────────
+    ("po_draft", "purchase", "any", "the buy-side PO computes GST and numbers through an "
+                                    "FY-scoped series; a draft PO does neither. Separate "
+                                    "behaviour — the shared APPEARANCE comes from docsheet.py"),
+    ("po_draft", "ra",       "any", "Draft POs do not need to know about Running Account bills"),
+    ("po_draft", "invoice",  "any", "Draft POs have no tax block and no relation to tax invoices"),
+    ("po_draft", "proforma", "any", "Draft POs have no relation to proformas"),
+    ("po_draft", "receipt",  "any", "nor to money received"),
+    ("po_draft", "client",   "any", "nor to the client ledger"),
+    ("po_draft", "product",  "any", "a draft PO is written from the BOQ, not the catalogue — "
+                                    "and it must not read a buy rate from anywhere"),
+    ("settings", "po_draft", "any", "settings.py owns the SERIES and knows nothing about the "
+                                    "document; po_draft.py reads it, never the reverse"),
+
+    # ── The BOQ line picker is a LEAF (CLIENT_CHANGES.md item 5) ────────────
+    #
+    # `boqpick.py` holds the grid two documents render and a third will: the
+    # checkbox rows, the family fold, the tools bar and the payload parser. It
+    # is the same shape of extraction as `docsheet.py` and it is a leaf for the
+    # same reason — if it could import either consumer, `po_draft.py` and
+    # `challan.py` would be coupled through the basement while appearing not to
+    # be. It renders no document and owns no route.
+    ("boqpick", "po_draft",  "any", "the picker is a leaf: po_draft.py renders THROUGH it"),
+    ("boqpick", "challan",   "any", "same — challan.py renders through it"),
+    ("boqpick", "ra",        "any", "the claim grid is ra.py's own and stays there; "
+                                    "it carries the over-claim guard and money columns"),
+    ("boqpick", "docsheet",  "any", "a form is not a printed sheet"),
+    ("boqpick", "invoice",   "any", "the picker has nothing to do with any document"),
+    ("boqpick", "proforma",  "any", "same"),
+    ("boqpick", "purchase",  "any", "same"),
+    ("boqpick", "receipt",   "any", "same"),
+    ("boqpick", "client",    "any", "same"),
+    ("boqpick", "product",   "any", "the picker reads a BOQ, never the catalogue"),
+    ("boqpick", "spec",      "any", "the BOQ already copied the clause it needs"),
+    ("boqpick", "settings",  "any", "settings.py imports quotation; nothing downstream "
+                                    "may import back"),
+    ("boqpick", "flask",     "any", "it builds HTML strings and owns no route"),
+    ("boq",     "boqpick",   "any", "boqpick.py imports boq.py for _line_id and the "
+                                    "rest; importing back is a cycle"),
+
+    # ── Delivery challans (CLIENT_CHANGES.md item 5) ────────────────────────
+    #
+    # The load-bearing one is `challan -> ra`. A DC records goods leaving the
+    # yard; an RA bill records money claimed. They diverge in both directions
+    # on a real site — material dispatched and not yet billed, material billed
+    # and not yet dispatched — and coupling them would force one to answer the
+    # other's questions. Nothing reconciles them, and that is ABOUT.md §7 gap
+    # 19 rather than a thing this module should close on its own.
+    ("challan", "ra",        "any", "a challan records goods moved, an RA bill records "
+                                    "money claimed; they diverge and neither answers "
+                                    "the other's questions"),
+    ("challan", "invoice",   "any", "a challan has no tax block and no relation to a "
+                                    "tax invoice"),
+    ("challan", "proforma",  "any", "the PI belongs to the quotation chain"),
+    ("challan", "purchase",  "any", "the buy side is a separate pipeline"),
+    ("challan", "po_draft",  "any", "two BOQ-chain documents that share a PICKER, not "
+                                    "each other — both import boqpick.py"),
+    ("challan", "quotation", "any", "the form furniture is read through docsheet.py, "
+                                    "which is the leaf both this module and the sell "
+                                    "chain depend on"),
+    ("challan", "product",   "any", "a challan is written from the BOQ, not the catalogue"),
+    ("challan", "receipt",   "any", "a goods movement is not a payment"),
+    ("challan", "client",    "any", "nor a client ledger"),
+    ("challan", "spec",      "any", "the BOQ already copied the clause"),
+    ("boq",     "challan",   "any", "the BOQ view page links out with url_for and reads "
+                                    "STORE['delivery_challans'] directly — importing "
+                                    "challan.py back would be a cycle"),
+    ("settings", "challan",  "any", "settings.py owns the SERIES and knows nothing about "
+                                    "the document; challan.py reads it, never the reverse"),
+    ("docsheet", "challan",  "any", "the sheet is a leaf: challan.py renders through it"),
+    ("docsheet", "boqpick",  "any", "the printed sheet knows nothing about a form"),
+
+    # ── RA billing (Phase 4) ────────────────────────────────────────────────
+    ("ra", "proforma", "any", "an RA bill is a claim against a BOQ; the PI belongs to "
+                              "the quotation chain and has nothing to say about it"),
+    ("ra", "invoice",  "any", "an RA bill computes its own per-line tax block per DOMAIN.md §4; "
+                              "invoice.py is the sell chain's document-level tax and must not be imported"),
+    ("ra", "purchase", "any", "the buy side is a separate pipeline"),
+    ("ra", "product",  "any", "a BOQ line is a clause of work, not a catalogue item; "
+                              "base_price is not a claim rate"),
+    ("ra", "spec",     "any", "the spec library is what a BOQ is WRITTEN from; a claim "
+                              "is measured against the BOQ, which already copied it"),
+
+    # ── The measurement sheet (CC-2 C2 / C1, 29 August 2026) ────────────────
+    #
+    # ⚠ **`measurement -> ra` is the load-bearing one.** `ra.py` imports THIS
+    #   module for `approved_qty_by_line()`, which is CC-2's own sentence in
+    #   code — *"approved measurements become the source of installation
+    #   quantity on RA-Installation."* The arrow runs one way; importing back is
+    #   a cycle at boot. `measurement.py` links out with `url_for` and reads
+    #   nothing of `ra.py`'s, exactly as `boq.py` does.
+    ("measurement", "ra",        "any", "ra.py imports THIS module for the "
+                                        "approved measured quantity; importing "
+                                        "back is a cycle"),
+    # ⚠ **`ra -> challan` is refused in BOTH directions, and C1 did not change
+    #   that.** The supply leg's C1 guard needs one question — does a challan
+    #   exist on this chain — and `ra.challan_exists()` answers it by reading
+    #   `STORE["delivery_challans"]` directly, the one-way trick used between
+    #   boq/ra, boq/challan and ra/receipt. The stated reason for the existing
+    #   `challan -> ra` prohibition ("they diverge and neither answers the
+    #   other's questions") cuts both ways, and an existence check is not a
+    #   reason to couple two document modules.
+    ("ra",          "challan",   "any", "the supply leg's C1 guard reads "
+                                        "STORE['delivery_challans'] directly; "
+                                        "coupling the two modules is what the "
+                                        "challan -> ra prohibition already "
+                                        "refuses from the other side"),
+    ("measurement", "challan",   "any", "the two legs of C1 are separate: a "
+                                        "challan proves goods moved, a "
+                                        "measurement proves work was done, and "
+                                        "neither answers the other"),
+    ("measurement", "receipt",   "any", "a measurement is not a payment"),
+    ("measurement", "invoice",   "any", "a measurement has no tax block and no "
+                                        "relation to a tax invoice"),
+    ("measurement", "proforma",  "any", "the PI belongs to the quotation chain"),
+    ("measurement", "purchase",  "any", "the buy side is a separate pipeline"),
+    ("measurement", "po_draft",  "any", "two BOQ-chain documents that share a "
+                                        "PICKER, not each other"),
+    ("measurement", "quotation", "any", "the form furniture is read through "
+                                        "docsheet.py, which is the leaf both "
+                                        "this module and the sell chain depend "
+                                        "on"),
+    ("measurement", "product",   "any", "a measurement is written from the BOQ, "
+                                        "not the catalogue"),
+    ("measurement", "client",    "any", "a measurement is not a client ledger"),
+    ("measurement", "spec",      "any", "the BOQ already copied the clause"),
+    # ⚠ **THIS ROW WAS REMOVED ON 6 SEPTEMBER 2026, and the arrow it banned is
+    #   now ALLOWED.** The old row is kept verbatim below rather than deleted,
+    #   because a ban that is lifted silently is a ban nobody can audit:
+    #
+    #     ("measurement", "settings",  "any", "settings.py imports quotation; nothing "
+    #                                         "downstream of it may import back. The "
+    #                                         "measurement series is FY-scoped "
+    #                                         "through pipeline.fy_ref and owns no "
+    #                                         "/settings counter"),
+    #
+    #   **Its stated premise stopped being true.** The reason given was that
+    #   measurement "owns no /settings counter" — and as of the joint
+    #   measurement sheet it owns a /settings **record**: the twelve numeric
+    #   column definitions, held there so a new site with a different pipe
+    #   schedule does not need a code change (CLIENT_CHANGES.md §0, twenty-third
+    #   block).
+    #
+    #   **The cycle half of the reason does not survive checking either.**
+    #   `settings.py` imports `quotation.py`, and nothing reachable from
+    #   `settings.py` imports `measurement.py` — asserted below rather than
+    #   argued, so the day that stops being true this test says so.
+    #
+    #   **And the arrow is precedented twice over.** `challan.py` and
+    #   `po_draft.py` are both BOQ-chain documents that own a /settings series
+    #   and import `settings` to read it. This is that pattern, a third time.
+    ("measurement", "employee",  "any", "who measured is a name on the sheet, "
+                                        "not a link to the employee master"),
+    ("measurement", "attendance", "any", "and emphatically not to the muster — "
+                                         "C6 is BLOCKED"),
+    ("measurement", "project",   "any", "measurement.py reads STORE['boqs'] and "
+                                        "links out with url_for"),
+    # ⚠ **THIS ROW WAS NARROWED FROM "any" TO "module" ON 4 OCTOBER 2026** (the
+    #   CLIENT_CHANGES.md §0 fortieth block — RA raised from the measurement
+    #   sheet). The old row is kept verbatim, because a ban that is loosened
+    #   silently is a ban nobody can audit:
+    #
+    #     ("measurement", "auth",      "any", "the gate is central "
+    #                                         "(auth.ROUTE_PERMISSIONS) and no page "
+    #                                         "module asks it directly"),
+    #
+    #   **Why it had to move.** Ruling B puts *Raise RA (Installation)* on
+    #   `/measurement/view`, and the brief requires it be drawn only for a user
+    #   holding what `/ra/create` requires. Sales Manager and Accountant hold
+    #   `measurement.view` but not `ra.create` (docs/ACCESS_MATRIX.md), so an
+    #   undrawn-for-them button needs `auth.can_reach()` — the dict the gate
+    #   answers from — and "hide what a role cannot do" (22 September 2026) is
+    #   the owner's own rule. The premise "no page module asks it directly" had
+    #   already stopped being true elsewhere: `boq.py`, `invoice.py`,
+    #   `proforma.py` and `address.py` all ask `can_reach()` through a
+    #   function-body import for exactly this purpose.
+    #
+    #   **What still holds.** A MODULE-LEVEL import of `auth` is still refused,
+    #   and `test_measurement_reaches_auth_only_inside_its_raise_ra_button`
+    #   below pins the one function-body import to `_raise_ra_btn()` — so the
+    #   hatch cannot quietly widen to a second caller.
+    ("measurement", "auth",      "module", "the gate is central "
+                                           "(auth.ROUTE_PERMISSIONS); the one "
+                                           "function-body import is the Raise RA "
+                                           "button's can_reach() check"),
+    ("boq",         "measurement", "any", "the BOQ view page links out with "
+                                          "url_for and reads STORE['measurements'] "
+                                          "directly — importing measurement.py "
+                                          "back would be a cycle"),
+    ("boqpick",     "measurement", "any", "the picker is a leaf: measurement.py "
+                                          "renders THROUGH it, at its FOURTH "
+                                          "consumer"),
+    ("docsheet",    "measurement", "any", "the sheet is a leaf: measurement.py "
+                                          "renders through it"),
+    ("challan",     "measurement", "any", "and the same edge from the other "
+                                          "side"),
+
+    # ── Receipts (CLIENT_CHANGES.md item 8) ─────────────────────────────────
+    # The load-bearing one is `ra -> receipt`. `receipt.py` imports `ra.py` for
+    # the bill and the balance arithmetic, so importing back is a cycle — and
+    # the arithmetic lives in ra.py precisely because `create_ra()` needs the
+    # carried balance at save time. ra.py's receipts panel reads
+    # STORE["receipts"] directly and links out with url_for instead.
+    ("ra", "receipt",  "any", "receipt.py imports ra.py; ra.py reads STORE['receipts'] "
+                              "directly and links out with url_for, which is what keeps "
+                              "the arrow one-way"),
+    ("boq", "receipt", "any", "a BOQ knows nothing about payments — they are keyed to "
+                              "an RA bill, and boq.py may not import ra.py either"),
+    ("spec", "receipt", "any", "a specification clause knows nothing about money received"),
+    ("receipt", "invoice",  "any", "a receipt settles an RA bill in the BOQ chain; "
+                                   "invoice.py is the sell chain's tax document"),
+    ("receipt", "proforma", "any", "the PI belongs to the quotation chain"),
+    ("receipt", "purchase", "any", "the buy side is a separate pipeline — that is money OUT"),
+    ("receipt", "product",  "any", "a payment has nothing to do with the catalogue"),
+    ("receipt", "spec",     "any", "nor with the specification library"),
+
+    # ── Client Segregation (CLIENT_CHANGES.md item 2) ───────────────────────
+    ("boq", "client", "any", "the BOQ knows nothing about client segregation"),
+    ("client", "invoice", "any", "client segregation uses RA claims, not invoices"),
+    ("client", "proforma", "any", "the PI belongs to the quotation chain"),
+    ("client", "purchase", "any", "the buy side is a separate pipeline"),
+    ("client", "product", "any", "a client page has nothing to do with the catalogue"),
+    ("client", "spec", "any", "a client page has nothing to do with the specification library"),
+
+    # ── Employee & miscellaneous charges (CLIENT_CHANGES.md item 9) ──────
+    ("charge", "boq",       "any", "a charge is not part of the BOQ chain"),
+    ("charge", "ra",        "any", "a charge is not an RA bill"),
+    ("charge", "receipt",   "any", "a charge is not a payment received"),
+    ("charge", "invoice",   "any", "a charge is not a tax invoice"),
+    ("charge", "proforma",  "any", "a charge is not a proforma"),
+    ("charge", "purchase",  "any", "a charge is not a purchase order"),
+    ("charge", "po_draft",  "any", "a charge is not a draft PO"),
+    ("charge", "challan",   "any", "a charge is not a delivery challan"),
+    ("charge", "product",   "any", "a charge is not a catalogue item"),
+    ("charge", "spec",      "any", "a charge is not a specification"),
+    ("charge", "docsheet",  "any", "a charge is not a printed document"),
+    ("charge", "boqpick",   "any", "a charge does not pick BOQ lines"),
+    ("charge", "client",    "any", "a charge is not client segregation"),
+    ("charge", "settings",  "any", "settings.py imports quotation; nothing downstream may import back"),
+    ("charge", "project",   "any", "a charge reads STORE['projects'] directly"),
+
+    # ── The employee master is a LEAF (CC-2 C4, 29 August 2026) ─────────────
+    #
+    # `employee.py` holds people and what they are paid. It renders no document
+    # and belongs to no chain, so it may reach for the chrome and nothing else —
+    # exactly `charge.py`'s position, one collection along.
+    #
+    # ⚠ **`employee` <-> `charge` is forbidden in BOTH directions, and that is
+    #   the load-bearing pair.** Linking the wages ledger to the employee master
+    #   is CC-2 **C5** (attendance and site-wise labour cost), which is GATED and
+    #   was not authorised by the 29 August override block. `charge.person` stays
+    #   free text. The edge would be the whole of C5's first step, so it is
+    #   refused at AST level rather than left to a comment.
+    ("employee", "charge",    "any", "linking the wages ledger to the employee "
+                                     "master is C5, which is gated"),
+    ("charge",   "employee",  "any", "and the same edge from the other side"),
+    ("employee", "boq",       "any", "an employee is not part of the BOQ chain"),
+    ("employee", "ra",        "any", "an employee is not an RA bill"),
+    ("employee", "receipt",   "any", "an employee is not a payment received"),
+    ("employee", "invoice",   "any", "an employee is not a tax invoice"),
+    ("employee", "proforma",  "any", "an employee is not a proforma"),
+    ("employee", "purchase",  "any", "an employee is not a purchase order"),
+    ("employee", "po_draft",  "any", "an employee is not a draft PO"),
+    ("employee", "challan",   "any", "an employee is not a delivery challan"),
+    ("employee", "product",   "any", "an employee is not a catalogue item"),
+    ("employee", "spec",      "any", "an employee is not a specification"),
+    ("employee", "docsheet",  "any", "an employee record never prints — there is "
+                                     "no document here and no sheet to render on"),
+    ("employee", "boqpick",   "any", "an employee does not pick BOQ lines"),
+    ("employee", "client",    "any", "an employee is not a client"),
+    ("employee", "project",   "any", "linking a person to a project is C5/C6, "
+                                     "both gated"),
+
+    # ⚠ **A MARKING CARRIES A `project_id` AND THIS ARROW IS STILL REFUSED**
+    #   (30 August 2026, sixth override block). That is not a contradiction; it
+    #   is `charge.py`'s arrangement four lines up, copied rather than
+    #   re-invented. A charge has stored `project_id` beside a snapshotted
+    #   `project_name` since it was written and reaches `STORE["projects"]`
+    #   directly — the one-way trick — and the muster does the same.
+    #
+    #   The import would buy one name lookup and would pull `address.py`, and
+    #   through it `product.py`'s stylesheet, into the import graph of a page
+    #   that renders neither. `project.py` does not import back either: it is a
+    #   leaf that five modules already depend on.
+    ("attendance", "project", "any", "a marking reads STORE['projects'] "
+                                     "directly, exactly as a charge does — the "
+                                     "link is an id, a name and a url_for, and "
+                                     "the collection carries all three"),
+    ("employee", "settings",  "any", "settings.py imports quotation; nothing "
+                                     "downstream may import back"),
+    ("employee", "auth",      "any", "the gate is central (auth.ROUTE_PERMISSIONS) "
+                                     "and no page module asks it directly"),
+
+    # ── The spec library ────────────────────────────────────────────────────
+    ("spec", "boq",      "any", "boq.py imports THIS module for the picker; importing back is a cycle"),
+    ("spec", "product",  "any", "spec.py replaces nothing in product.py and must not depend on it"),
+    ("spec", "quotation", "any", "the library is not part of the quotation chain"),
+    ("spec", "ra",       "any", "a spec knows nothing about billing"),
+
+    # ── The shared document sheet is a LEAF ─────────────────────────────────
+    #
+    # `docsheet.py` holds the printed chrome — letterhead, party block, table
+    # shell, totals rows, bank block, signature — that six documents used to
+    # each write their own copy of. It may import the A4 stylesheet and the
+    # money formatters; it may not import any module that renders a document
+    # through it.
+    #
+    # This is the half that preserves the standing rule. `ra.py` may never
+    # import `invoice.py` (the RA tax block is per line with HSN/SAC, the sell
+    # chain's is document-level) — and after the extraction neither imports the
+    # other. **Both import the leaf.** If `docsheet` were allowed to import
+    # either one, that prohibition would be satisfied on paper and defeated in
+    # practice, because the coupling would simply run through the basement.
+    ("docsheet", "invoice",   "any", "the sheet is a leaf: invoice.py renders THROUGH it"),
+    ("docsheet", "proforma",  "any", "same — proforma.py renders through it"),
+    ("docsheet", "purchase",  "any", "same — purchase.py renders through it"),
+    ("docsheet", "ra",        "any", "same — ra.py renders through it, and this is the "
+                                     "arrow that keeps ra.py and invoice.py apart"),
+    ("docsheet", "boq",       "any", "same"),
+    ("docsheet", "po_draft",  "any", "same"),
+    ("docsheet", "receipt",   "any", "a payment is not a printed document"),
+    ("docsheet", "client",    "any", "nor is a client ledger"),
+    ("docsheet", "product",   "any", "the sheet has nothing to do with the catalogue"),
+    ("docsheet", "spec",      "any", "nor with the specification library"),
+    ("docsheet", "settings",  "any", "settings.py imports quotation; nothing downstream may import back"),
+    ("docsheet", "flask",     "any", "it builds HTML strings and owns no route"),
+    # 30 September 2026: the statutory COPIES live in the leaf and three of the
+    # four documents that print them are already refused above. The fourth,
+    # the merged RA, is added so the copy set cannot reach back into a module
+    # that renders through it — `copies()` takes a render function, it never
+    # imports one.
+    ("docsheet", "merged_ra", "any", "same — merged_ra.py prints its copies THROUGH it"),
+
+    # ── demo_seed is data plus a driver, at the bottom of the graph ─────────
+    # It writes the fictional company through the application's OWN routes, on
+    # a test client it is HANDED, so it needs nothing of the app at module
+    # level. `emptiness_problems()` reads `db.COLLECTIONS` inside its body —
+    # the one function-body arrow, pinned by
+    # test_demo_seed_imports_nothing_of_the_app_at_module_level below.
+    ("demo_seed", "store",     "any", "demo_seed.py is HANDED the store it checks; importing "
+                                      "it would let the seed write past the routes"),
+    ("demo_seed", "spec",      "any", "the library is written through /spec/create, never "
+                                      "through spec.py — that is what proves the routes work"),
+    ("demo_seed", "boq",       "any", "same — through /boq/create; boq.py reads the seed, "
+                                      "so this arrow would also be a cycle"),
+    ("demo_seed", "branding",  "any", "same — the company is written through /settings"),
+    ("demo_seed", "settings",  "any", "same"),
+    ("demo_seed", "pipeline",  "any", "same"),
+    ("demo_seed", "dashboard", "any", "same"),
+    ("demo_seed", "auth",      "any", "the admin is created by tools/seed_demo.py, not here"),
+    ("demo_seed", "flask",     "any", "it drives a client it is handed; it is not a Flask module"),
+    ("spec",      "demo_seed", "any", "spec.py seeds nothing: a fresh database is an empty "
+                                      "library, and the sample one is written through the route"),
+
+    # ── logo.py and landing.py (white-label, October 2026) ─────────────────
+    ("logo",    "store",     "any", "logo.py only ENCODES an upload; settings.py stores it"),
+    ("logo",    "settings",  "any", "settings.py imports this leaf; importing back is a cycle"),
+    ("logo",    "branding",  "any", "branding.py applies the stored record; the encoder "
+                                    "never needs to know where it ends up"),
+    ("landing", "store",     "any", "the PUBLIC page reads /settings through settings.py "
+                                    "only — a store import would put every record within "
+                                    "reach of an anonymous visitor"),
+    ("landing", "auth",      "any", "the page is PUBLIC; it is handed the sign-in URL"),
+
+    # ── The project entity is a LEAF (Pass A) ────────────────────────────
+    #
+    # project.py holds the commercial engagement BOQs are grouped under.
+    # It is a leaf: it may import dashboard, pipeline, store and branding,
+    # and nothing else from the app.  boq.py reads STORE["projects"]
+    # directly and links out with url_for — the same one-way trick used
+    # between boq→ra, boq→challan, boq→po_draft, and ra→receipt.
+    #
+    # Nothing imports project.py at module level.  That is what keeps the
+    # graph acyclic: project sits beside client, both above dashboard and
+    # below the document chain.
+    ("project", "boq",       "any", "project.py is a leaf; boq.py reads STORE['projects'] "
+                                    "directly and links out with url_for"),
+    ("project", "challan",   "any", "a project does not know about challans"),
+    ("project", "purchase",  "any", "the buy side is a separate pipeline"),
+    ("project", "po_draft",  "any", "a project does not know about draft POs"),
+    ("project", "invoice",   "any", "a project does not know about tax invoices"),
+    ("project", "ra",        "any", "a project does not know about RA bills"),
+    ("project", "receipt",   "any", "a project does not know about payments"),
+    ("project", "quotation", "any", "a project does not know about quotations"),
+    ("project", "product",   "any", "a project is not part of the catalogue"),
+    ("project", "docsheet",  "any", "a project is not a printed document"),
+    ("project", "boqpick",   "any", "a project does not pick BOQ lines"),
+    ("project", "spec",      "any", "a project is not a specification"),
+    ("project", "client",    "any", "client segregation is a separate concern"),
+    ("project", "settings",  "any", "settings.py imports quotation; nothing downstream "
+                                    "may import back"),
+
+    # ⚠ The two reverses of the arrows added on 30 August 2026 (fourth pass).
+    #   `project.py -> address.py` and `projectview.py -> project.py` both
+    #   exist and are in REQUIRED below; these are what stop either becoming a
+    #   cycle at boot.
+    ("address", "project",   "any", "project.py imports address.py for the SITE "
+                                    "picker and SITE_TYPES. address.py reads "
+                                    "STORE['projects'] DIRECTLY for "
+                                    "references_of() — the one-way trick, and it "
+                                    "has to be: five other modules import "
+                                    "address.py, so an import back from it "
+                                    "would put project.py under all of them"),
+    ("project", "projectview", "any", "projectview.py imports project.py for "
+                                      "site_drift(); the reverse is a cycle"),
+
+    # ── auth.py sits at the BOTTOM of the graph (Phase 3B) ───────────────
+    #
+    # It has to, because it is imported by `dashboard.py` — which every other
+    # module imports for `BASE_STYLES` and `_nav()`. Anything auth.py pulled in
+    # at module level would therefore be pulled in by the whole application.
+    #
+    # `dashboard` is "module" rather than "any" for exactly the reason
+    # `dashboard -> product` is: `auth._shell()` imports the chrome inside the
+    # function body, which breaks the cycle and is deliberate. At module level
+    # it would be a boot failure.
+    ("auth", "dashboard", "module", "dashboard.py imports auth.py for the Access card, "
+                                    "so a module-level import back is a cycle. "
+                                    "auth._shell() imports the chrome in the function "
+                                    "body — the precedent dashboard.index() sets"),
+    ("auth", "quotation", "module", "same cycle, one further out: quotation.py imports "
+                                    "dashboard.py. QUOTATION_STYLES is pulled in "
+                                    "beside BASE_STYLES inside _shell()"),
+    ("auth", "docsheet",  "any",    "auth.py renders no document. Nothing that prints "
+                                    "may be reachable from the bottom of the graph"),
+    ("auth", "boq",       "any",    "identity knows nothing about a schedule"),
+    ("auth", "ra",        "any",    "identity knows nothing about a claim"),
+    ("auth", "invoice",   "any",    "identity knows nothing about a tax invoice"),
+    ("auth", "purchase",  "any",    "identity knows nothing about the buy side"),
+    ("auth", "settings",  "any",    "settings.py imports quotation, which imports "
+                                    "dashboard, which imports auth"),
+    ("auth", "product",   "any",    "and product.py is one of the two frozen files"),
+    ("auth", "db",        "any",    "auth.py mutates STORE like every other module; "
+                                    "db.py mirrors it. It must not reach for the "
+                                    "database itself"),
+
+    # ── specpick.py — the spec-library picker for a quotation (12 Sep 2026) ──
+    #
+    # A leaf `quotation.py` reaches INSIDE its three unfrozen functions only:
+    # the freeze on that file (INTRODUCTION.md §7) permits no edit anywhere
+    # else, a module-level import included, and `tests/test_nav_user_chip.py`
+    # would refuse one. The leaf never imports `quotation.py` back — the one
+    # thing it needs from the sell chain, the quantity formatter for the GST
+    # message, is passed in as an argument — and it knows nothing of the
+    # chain's other documents or of the catalogue it is the alternative to.
+    ("quotation", "specpick", "module", "quotation.py is frozen outside three named "
+                                        "functions; the leaf is reached inside them"),
+    ("specpick", "quotation", "any", "the leaf is reached BY quotation.py; importing "
+                                     "back would be a cycle at call time and would "
+                                     "couple the picker to the frozen file"),
+    ("specpick", "product",   "any", "the library is the alternative to the "
+                                     "catalogue, not a reader of it — and "
+                                     "product.py is one of the two frozen files"),
+    ("specpick", "proforma",  "any", "a pick becomes a quotation line; the PI copies it"),
+    ("specpick", "invoice",   "any", "same, one link further down"),
+    ("specpick", "purchase",  "any", "the buy side has its own picker"),
+    ("specpick", "boq",       "any", "the BOQ writes from the same library through "
+                                     "its own picker; the two do not share code"),
+    ("specpick", "auth",      "any", "the SWITCH is read by quotation.py, not here — "
+                                     "the leaf answers what a library pick is, never "
+                                     "whether the library is in use"),
+    ("specpick", "dashboard", "any", "the leaf renders pieces of a page, not a page"),
+    ("specpick", "spec",      "module", "spec.py is imported inside ensure_seeded() "
+                                        "only — the arrangement create_quotation() "
+                                        "always had for its seeder, so the graph in "
+                                        "ABOUT.md §2 gains no edge for one call"),
+
+    # ── chrome.py — the app shell is a LEAF (14 September 2026) ─────────────
+    #
+    # `BASE_STYLES`, `ICONS`, the user chip, the persistence strip and `_nav()`
+    # moved out of `dashboard.py` verbatim, so that a page reaches its
+    # navigation without importing the module that computes the landing page's
+    # metrics. It is held to `docsheet.py`'s standard: it may import the three
+    # bottom modules and `db`, and nothing that prints, nothing that renders a
+    # page, and nothing that imports it back.
+    #
+    # `auth` is "module" rather than "any" for the reason `dashboard -> product`
+    # is: `_nav_links()` and `_user_chip()` reach `auth` inside the function
+    # body, because `auth.py` now imports THIS module at module level for
+    # `_shell()` — the arrow that used to be a function-body import there.
+    ("chrome", "auth",        "module", "auth.py imports chrome.py at module level "
+                                        "for _shell(); the nav asks can_reach() "
+                                        "inside the function body, as it always did"),
+    ("chrome", "dashboard",   "any", "dashboard.py imports chrome.py and re-exports "
+                                     "BASE_STYLES and _nav for the two frozen files"),
+    ("chrome", "docsheet",    "any", "the shell may not depend on the printed sheet"),
+    ("chrome", "quotation",   "any", "the leaf knows nothing about a document"),
+    ("chrome", "proforma",    "any", "same"),
+    ("chrome", "invoice",     "any", "same"),
+    ("chrome", "purchase",    "any", "same"),
+    ("chrome", "ra",          "any", "same"),
+    ("chrome", "boq",         "any", "same"),
+    ("chrome", "po_draft",    "any", "same"),
+    ("chrome", "challan",     "any", "same"),
+    ("chrome", "measurement", "any", "same"),
+    ("chrome", "merged_ra",   "any", "same"),
+    ("chrome", "receipt",     "any", "nor about a payment"),
+    ("chrome", "client",      "any", "nor a client ledger"),
+    ("chrome", "product",     "any", "nor the catalogue — product.py imports it BACK, "
+                                     "through dashboard.py, and is frozen"),
+    ("chrome", "spec",        "any", "nor the specification library"),
+    ("chrome", "settings",    "any", "settings.py imports quotation; nothing "
+                                     "downstream may import back"),
+    ("chrome", "address",     "any", "address.py imports the chrome; importing back "
+                                     "is a cycle"),
+    ("chrome", "project",     "any", "same"),
+    ("chrome", "projectview", "any", "same"),
+    ("chrome", "employee",    "any", "same"),
+    ("chrome", "attendance",  "any", "same"),
+    ("chrome", "charge",      "any", "same"),
+    ("chrome", "approval",    "any", "approval.py imports the chrome for its "
+                                     "decision page; importing back is a cycle"),
+    ("chrome", "boqpick",     "any", "the shell knows nothing about a form"),
+    ("chrome", "specpick",    "any", "same"),
+    # ── series.py — the document-number FLOOR is a LEAF (25 September 2026) ─
+    #
+    # ABOUT.md §7 gap 36. It holds one floor per numbered series and the one
+    # scan that finds each series' highest issued number. It is a leaf for
+    # `docsheet.py`'s reason and one sharper one:
+    #
+    # ⚠ **`boq.py` MAY NOT IMPORT `settings.py`** — the row is eleven screens
+    #   up, with the reason *"settings imports quotation; nothing downstream of
+    #   it may import back"* — and nor may `charge.py`, `docsheet.py`,
+    #   `boqpick.py`, `employee.py`, `project.py` or `chrome.py`. So the floors
+    #   could not live behind `settings.py`'s accessors the way the draft-PO
+    #   and challan series do: a floor reachable from some minters and not
+    #   others is not a floor. The leaf imports `store` and reads
+    #   `STORE["settings"]` directly — the one-way trick used between
+    #   quotation/proforma, boq/ra, ra/receipt and boq/challan.
+    #
+    # ⚠ **`series -> invoice` is the LOAD-BEARING one.** `ra.py` may never
+    #   import `invoice.py` (its own header says so at length), and the RA tax
+    #   invoice counter now reads its max through this leaf. If the leaf could
+    #   import either module, that prohibition would be satisfied on paper and
+    #   defeated in practice, because the coupling would run through the
+    #   basement — `docsheet.py`'s argument exactly. The three tax-invoice
+    #   series were measured on 25 September 2026 and **cannot collide**, so
+    #   they were deliberately NOT unified and each keeps its own counter,
+    #   its own floor and its own module.
+    ("series", "invoice",     "any", "ra.py may never import invoice.py; a leaf "
+                                     "that imported either would defeat that "
+                                     "prohibition through the basement"),
+    ("series", "ra",          "any", "same, from the other side"),
+    ("series", "merged_ra",   "any", "and the third tax-invoice counter"),
+    ("series", "boq",         "any", "the leaf reads STORE['boqs'] directly"),
+    ("series", "proforma",    "any", "same"),
+    ("series", "purchase",    "any", "same"),
+    ("series", "receipt",     "any", "same"),
+    ("series", "measurement", "any", "same"),
+    ("series", "quotation",   "any", "quotation.py is FROZEN and its series "
+                                     "deliberately has no floor — the leaf must "
+                                     "not acquire a reason to reach it"),
+    ("series", "product",     "any", "the other frozen file"),
+    ("series", "challan",     "any", "the challan keeps a stored high-water "
+                                     "counter, not a max+1 scan; it is not in "
+                                     "this registry"),
+    ("series", "po_draft",    "any", "same"),
+    ("series", "settings",    "any", "settings.py imports THIS module for the "
+                                     "form; importing back is a cycle, and it is "
+                                     "the arrow that forced the leaf to exist"),
+    ("series", "branding",    "any", "the leaf answers an ORDINAL; the company "
+                                     "prefix and the Rule 46(b) cap are "
+                                     "pipeline.fy_ref()'s and stay with the "
+                                     "minter"),
+    ("series", "pipeline",    "any", "same — the leaf does no formatting at all"),
+    ("series", "dashboard",   "any", "it renders nothing"),
+    ("series", "chrome",      "any", "same"),
+    ("series", "docsheet",    "any", "same"),
+    ("series", "auth",        "any", "a starting number is not an access "
+                                     "question"),
+    ("series", "db",          "any", "it mutates STORE like every other module; "
+                                     "db.py mirrors it"),
+    ("series", "flask",       "any", "it owns no route and builds no HTML"),
+
+    # The other direction: the printed sheet may not depend on the shell.
+    # `docsheet.py` reads `BASE_STYLES` through `dashboard.py`'s re-export,
+    # deliberately, and says so at the import.
+    ("docsheet", "chrome",    "any", "a printed document must not depend on the "
+                                     "app shell; the sheet reads BASE_STYLES "
+                                     "through dashboard.py's re-export on purpose"),
+
+    # ── Import BOQ from Excel, 29 September 2026 ────────────────────────────
+    # boqimport.py imports boq.py to render /boq/create prefilled; the Import
+    # button on that form reaches back with url_for("boqimport.upload"), a
+    # string. The reverse import would be a cycle at boot.
+    ("boq", "boqimport",       "any", "boqimport.py imports boq.py; the form's Import "
+                                      "button is a url_for string"),
+    ("boq", "sheetimport",     "any", "the BOQ never reads a workbook; boqimport.py "
+                                      "hands it an editor model"),
+
+    # ── GSTIN auto-fill, 29 September 2026 ──────────────────────────────────
+    # gst_lookup.py is a leaf: address.py imports it for the check, the
+    # lookup and the pattern the form shares. The reverse would be a cycle at
+    # boot, and a leaf that drew a page or asked the gate would stop being one.
+    ("gst_lookup", "address", "any", "address.py imports gst_lookup; the lookup "
+                                     "knows no form"),
+    ("gst_lookup", "flask",   "any", "it owns no route and builds no HTML"),
+    ("gst_lookup", "auth",    "any", "the routes in address.py are gated; the "
+                                     "lookup is handed a user id"),
+    ("gst_lookup", "db",      "any", "the cache is a STORE collection; db.py "
+                                     "mirrors it like any other"),
+
+    # ── dcbill.py — the ONE "is this challan billed?" predicate (4 Oct 2026) ─
+    # CLIENT_CHANGES.md §0, fortieth block, ruling C. `ra.py` (the picker and
+    # the POST refusal) and `challan.py` (the *Billed in* mark) both need the
+    # answer and may not import each other — `challan -> ra` and `ra ->
+    # challan` are both refused above. Reading STORE directly from each side
+    # would have been two copies of one predicate, ABOUT.md §7 gap 16b's
+    # failure; so it is a leaf both import. If the leaf could import either
+    # document module, the prohibition would be kept on paper and defeated in
+    # the basement — `docsheet.py`'s argument, a fourth time.
+    ("dcbill", "ra",          "any", "ra.py imports this leaf; importing back is "
+                                     "a cycle, and it would couple challan.py to "
+                                     "ra.py through the basement"),
+    ("dcbill", "challan",     "any", "challan.py imports this leaf, for the same "
+                                     "reason from the other side"),
+    ("dcbill", "measurement", "any", "a measurement is not a challan; the leaf "
+                                     "answers one question"),
+    ("dcbill", "merged_ra",   "any", "a merged document holds no source of its "
+                                     "own — the leg bills carry it"),
+    ("dcbill", "boq",         "any", "the leaf reads STORE['ra_bills'] directly "
+                                     "and needs no schedule"),
+    ("dcbill", "flask",       "any", "it owns no route and builds no HTML"),
+    ("dcbill", "auth",        "any", "being billed is not an access question"),
+]
+
+
+@pytest.mark.parametrize("module,forbidden,scope,why", FORBIDDEN)
+def test_module_does_not_import(module, forbidden, scope, why):
+    if not (REPO / f"{module}.py").exists():
+        pytest.skip(f"{module}.py does not exist yet")
+    found = imports_of(module, top_level_only=(scope == "module"))
+    where = " at module level" if scope == "module" else ""
+    assert forbidden not in found, (
+        f"{module}.py must not import {forbidden}.py{where} — {why}"
+    )
+
+
+# ── The directions that must EXIST ──────────────────────────────────────────
+REQUIRED = [
+    # ── series.py, the document-number floor (25 September 2026) ───────────
+    # Every minter that scans max+1 reads its ordinal through the leaf, which
+    # is what makes `/settings`' refusal ("that is at or below the current
+    # max, which is N") and the minted number two readings of ONE scan rather
+    # than two implementations that can drift apart.
+    ("invoice",     "series", "the tax invoice ordinal and its floor"),
+    ("ra",          "series", "the RA document number AND the RA tax invoice "
+                              "serial — two series, two floors, one leaf"),
+    ("merged_ra",   "series", "the merged tax invoice serial"),
+    ("proforma",    "series", "the proforma ordinal — the one series with no "
+                              "financial year"),
+    ("boq",         "series", "the BOQ ordinal. boq.py may not import "
+                              "settings.py, which is why this leaf exists"),
+    ("measurement", "series", "the measurement sheet ordinal"),
+    ("receipt",     "series", "the receipt ordinal"),
+    ("purchase",    "series", "the buy-side PO ordinal"),
+    ("settings",    "series", "the FORM — the boxes, the current max beside "
+                              "each one, and the validator. settings.py owns "
+                              "the page; the leaf owns the rule"),
+    ("series",      "store",  "STORE['settings'] for the floors, and each "
+                              "collection for its own max — read DIRECTLY, "
+                              "which is the whole reason it can be a leaf"),
+
+    ("boq", "quotation", "the document toolkit — _inr, _fmt_qty, _amount_in_words, "
+                         "_meta, VIEW_DOC_STYLES, QUOTATION_STYLES"),
+    ("boq", "chrome", "BASE_STYLES and _nav"),
+    ("boq", "pipeline",  "esc / parse_money / fy_of / fy_ref"),
+    ("boq", "address",   "the customer picker"),
+    ("boq", "spec",      "the specification library — what the line picker is built from"),
+    ("boq", "demo_seed", "the sample schedule behind /boq/create?demo=1"),
+    ("boq", "store",     "the shared STORE dict"),
+    ("boq", "branding",  "every company string, colour and image"),
+
+    ("chrome", "db", "_nav() renders the persistence-failure strip, and _nav() is "
+                     "the only thing in this app that is on every screen page. "
+                     "It moved here from dashboard.py with the strip on "
+                     "14 September 2026"),
+    ("chrome", "store", "the registry's live counts — `REGISTERS[i].count()` "
+                        "reads each collection directly so the rail can draw a "
+                        "figure on every page without importing the module that "
+                        "owns the register (14 September 2026, the sidebar). "
+                        "It was refused until the registry existed"),
+    ("dashboard", "chrome", "BASE_STYLES, ICONS and _nav — drawn on the landing "
+                            "page, and BASE_STYLES and _nav re-exported for the "
+                            "two frozen files and the printed sheet"),
+    ("auth", "chrome", "BASE_STYLES and _nav for _shell(), at module level — the "
+                       "function-body hatch went with the extraction "
+                       "(14 September 2026)"),
+    ("approval", "chrome", "BASE_STYLES and _nav for _decision_page(), at module "
+                           "level, for the same reason"),
+
+    ("ra", "boq",      "the schedule a claim is measured against, plus "
+                       "_line_id / _item_no / _num — and _line_id is the key a "
+                       "claim is matched on"),
+    ("ra", "pipeline", "esc / parse_money / fy_of / fy_ref"),
+    ("ra", "store",    "the shared STORE dict"),
+    ("ra", "branding", "COMPANY_SHORT for the document series"),
+    ("ra", "chrome", "BASE_STYLES and _nav — the entry form is a page in the "
+                     "app, so it carries the same chrome and the same "
+                     "persistence-failure strip as every other page"),
+    ("ra", "quotation", "QUOTATION_STYLES and _inr — the form widgets, so the "
+                        "RA form IS the BOQ form. Emphatically NOT _tax_lines: "
+                        "an RA bill is a claim document, and "
+                        "test_ra_record.py asserts that absence at AST level"),
+
+    ("receipt", "ra",        "the bill a payment is against, the revision chain, and "
+                             "the balance arithmetic — received_against / outstanding_of "
+                             "/ previous_balance, which live in ra.py so that "
+                             "create_ra() can snapshot without importing downstream"),
+    ("receipt", "boq",       "BOQ_STYLES, so the receipt form is the same form"),
+    ("receipt", "quotation", "QUOTATION_STYLES and _inr — the form widgets"),
+    ("receipt", "chrome", "BASE_STYLES and _nav"),
+    ("receipt", "pipeline",  "esc / parse_money / fy_of / fy_ref"),
+    ("receipt", "store",     "the shared STORE dict"),
+    ("receipt", "branding",  "COMPANY_SHORT for the document series"),
+
+    ("spec", "chrome", "BASE_STYLES and _nav"),
+    ("spec", "pipeline",  "esc"),
+    ("spec", "store",     "the shared STORE dict"),
+    ("spec", "branding",  "every company string, colour and image"),
+
+    ("client", "boq",       "boq_identity, BOQ_STYLES"),
+    ("client", "ra",        "bills_of, is_issued, is_cancelled"),
+    ("client", "receipt",   "receipts_of_boq"),
+    ("client", "quotation", "QUOTATION_STYLES and _inr"),
+    ("client", "chrome", "BASE_STYLES and _nav"),
+    ("client", "pipeline",  "esc / norm_name"),
+    ("client", "store",     "the shared STORE dict"),
+    ("client", "branding",  "every company string, colour and image"),
+
+    ("charge", "chrome", "BASE_STYLES and _nav"),
+    ("charge", "pipeline",  "esc"),
+    ("charge", "store",     "the shared STORE dict"),
+    ("charge", "branding",  "every company string, colour and image"),
+    ("charge", "quotation", "QUOTATION_STYLES"),
+
+    ("employee", "chrome",    "BASE_STYLES and _nav"),
+    ("employee", "dashboard", "rupees — the screen money format lives beside "
+                              "the dashboard's own helpers, not in the chrome"),
+    ("employee", "pipeline",  "esc and parse_money"),
+    ("employee", "store",     "the shared STORE dict"),
+    ("employee", "branding",  "every company string, colour and image"),
+    ("employee", "quotation", "QUOTATION_STYLES"),
+    ("employee", "address",   "the SITE picker over the shared address book "
+                              "(30 August 2026). `site` was free text on this "
+                              "record and on an attendance marking, which is "
+                              "why the live data spells one place more than "
+                              "one way. `po_draft.py` and `challan.py` already "
+                              "reach the same book the same way, and "
+                              "`attendance.py` reads the picker THROUGH this "
+                              "module rather than importing the book twice — "
+                              "one arrow, one definition, so the two forms "
+                              "cannot describe one field differently"),
+
+    # ── The shared document sheet, and everything that renders through it ────
+    ("docsheet", "quotation", "VIEW_DOC_STYLES and the document's own money "
+                              "formatters. quotation.py is frozen against EDITS "
+                              "(INTRODUCTION.md §7), not against being depended "
+                              "on — boq, ra and purchase all import it already"),
+    ("docsheet", "dashboard", "BASE_STYLES, the first sheet in the stack — read "
+                              "through dashboard.py's re-export and NOT from "
+                              "chrome.py, because the printed sheet may not "
+                              "depend on the shell (FORBIDDEN above)"),
+    ("docsheet", "pipeline",  "esc, and PIPELINE_STYLES for the stack"),
+    ("docsheet", "branding",  "the company identity the letterhead is built from"),
+
+    ("invoice",  "docsheet", "the letterhead, party block, table shell, totals "
+                             "rows and signature — one copy, not four"),
+    ("proforma", "docsheet", "the same sheet, plus the bank block it used to own"),
+    ("purchase", "docsheet", "the same sheet. The buy side shares the CHROME "
+                             "with the sell side and nothing else — no tax "
+                             "arithmetic and no business logic cross this arrow"),
+    ("ra",       "docsheet", "the same sheet again, and THIS is the arrow that "
+                             "lets the RA bill carry the tax invoice's "
+                             "letterhead without ra.py importing invoice.py"),
+
+    ("po_draft", "docsheet", "the same sheet as the buy-side PO — separate "
+                             "behaviour, shared appearance"),
+    ("po_draft", "boq",      "superseded_ids, _line_id, _item_no, _num, _fmt_qty "
+                             "— and _line_id is the key a picked line is matched on"),
+    ("po_draft", "settings", "the ONE running number series, editable at /settings. "
+                             "settings.py owns it and imports nothing back"),
+    ("po_draft", "address",  "the vendor picker over the shared address book"),
+    ("po_draft", "chrome", "BASE_STYLES and _nav"),
+    ("po_draft", "pipeline",  "esc"),
+    ("po_draft", "store",     "the shared STORE dict"),
+    ("po_draft", "branding",  "every company string, colour and image"),
+
+    ("boqpick", "boq",      "_line_id / _item_no / _num / _fmt_qty / "
+                            "_json_for_script / MAX_LINES — and _line_id is the "
+                            "key a picked line is matched on"),
+    ("boqpick", "pipeline", "esc"),
+
+    ("po_draft", "boqpick", "the line picker, extracted at the SECOND consumer "
+                            "rather than the fourth. `/po/create` is pinned "
+                            "byte-for-byte across that move in "
+                            "tests/test_print_golden.py"),
+
+    # ── The buy side's own arrows up the BOQ chain (Pass C) ─────────────────
+    ("purchase", "boq",     "superseded_ids — a superseded schedule is refused at "
+                            "the route, not merely unlinked — plus _line_id, "
+                            "_item_no, _num, _fmt_qty and MAX_LINES"),
+    ("purchase", "boqpick", "the line picker, at its THIRD consumer. It was "
+                            "extracted so this grid would not be written a third "
+                            "time, and importing it is what makes that true"),
+
+    ("challan", "boqpick",  "the same grid — the challan is the second consumer "
+                            "the extraction was made for"),
+    ("challan", "docsheet", "the same A4 sheet as every other document that "
+                            "prints, and THIS is the arrow that lets the challan "
+                            "carry the tax invoice's letterhead without importing "
+                            "invoice.py — or quotation.py, which is on its own "
+                            "prohibited list"),
+    ("challan", "boq",      "superseded_ids, _line_id, _item_no, _fmt_qty and "
+                            "_ancestor_ids — the revision chain the cumulative "
+                            "dispatched quantity is summed across"),
+    ("challan", "settings", "the ONE running number series, editable at /settings. "
+                            "settings.py owns it and imports nothing back"),
+    ("challan", "address",  "the consignee prefill over the shared address book"),
+    ("challan", "chrome", "BASE_STYLES and _nav"),
+    ("challan", "pipeline",  "esc and gstin_state_label — the seller's State is "
+                             "DERIVED from the GSTIN, never stored beside it"),
+    ("challan", "store",     "the shared STORE dict"),
+    ("challan", "branding",  "every company string, colour and image"),
+
+    # ── The measurement sheet (CC-2 C2, 29 August 2026) ──────────────────
+    #
+    # ⚠ **`ra -> measurement` is the arrow CC-2 states in its own words** —
+    #   "approved measurements become the source of installation quantity on
+    #   RA-Installation". It is the ONLY arrow into this module from a document
+    #   module, and `measurement.py` imports none of them back.
+    ("ra", "measurement", "approved_qty_by_line() and has_approved_measurement() "
+                          "— the installation ceiling and C1's ordering guard. "
+                          "This is CC-2 C2's own sentence in code and the reason "
+                          "measurement.py may never import ra.py"),
+    ("measurement", "boq",      "superseded_ids, _line_id, _item_no, _fmt_qty and "
+                                "_ancestor_ids — the revision chain the "
+                                "cumulative measured quantity is summed across"),
+    ("measurement", "boqpick",  "the same grid, at its FOURTH consumer. It was "
+                                "extracted so this would not be written a fourth "
+                                "time, and importing it is what makes that true"),
+    ("measurement", "docsheet", "the same A4 sheet as every other document that "
+                                "prints — NOTHING new was drawn for this "
+                                "document, which is what CC-2's silence on its "
+                                "appearance required"),
+    ("measurement", "approval", "the ladder (B6). measurement.py is the fifth "
+                                "entry in approval.DOCUMENTS and calls "
+                                "can_print / can_modify / panel like the other "
+                                "four"),
+    ("measurement", "chrome", "BASE_STYLES and _nav"),
+    ("measurement", "pipeline",  "esc, fy_of, fy_ref and gstin_state_label — the "
+                                 "seller's State is DERIVED from the GSTIN, "
+                                 "never stored beside it"),
+    ("measurement", "store",     "the shared STORE dict"),
+    ("measurement", "branding",  "every company string, colour and image"),
+
+    # ── project.py is a LEAF (Pass A) ────────────────────────────────────
+    ("project", "chrome", "BASE_STYLES and _nav"),
+    ("project", "pipeline",  "esc / norm_name"),
+    ("project", "store",     "the shared STORE dict"),
+    ("project", "branding",  "every company string, colour and image"),
+    ("project", "address",   "the SITE picker over the shared address book "
+                             "(30 August 2026, fourth pass). `site_address` was "
+                             "free text on this record, which is why the live "
+                             "data spells one place two ways — and a project's "
+                             "site is a JOIN KEY, which free text cannot be. "
+                             "⚠ `SITE_TYPES` is read from address.py and never "
+                             "redefined here: two pickers that can disagree "
+                             "about what counts as a site is the defect, and "
+                             "employee.py reads the same tuple from the same "
+                             "place. address.py does NOT import back — it reads "
+                             "STORE['projects'] directly, the one-way trick"),
+
+    ("projectview", "project", "site_drift() — where the label snapshot and the "
+                               "live address have come apart. The drift belongs "
+                               "to the module that WRITES both copies, for the "
+                               "reason party_drift() lives in ra.py; a second "
+                               "copy of the resolve-a-label rule here is the "
+                               "SITE_TYPES defect one level up"),
+
+    # ── ⚠ THE ONE ARROW INTO attendance.py, and it did not exist until the
+    #    FIFTH override block of 30 August 2026 ────────────────────────────
+    ("projectview", "attendance", "marking_cells() and markings_at_site(), for "
+                                  "the Site Labour section. ⚠ NOTHING imported "
+                                  "attendance.py until 30 August 2026 and this "
+                                  "is still the ONLY module that may — "
+                                  "test_attendance.py holds it as an ALLOWLIST "
+                                  "OF ONE rather than a blacklist. The arrow "
+                                  "belongs to projectview.py rather than "
+                                  "project.py because the module that RENDERS "
+                                  "the section owns it, exactly as the arrow to "
+                                  "ra.py for revision_chain() does; putting it "
+                                  "on project.py would pull employee.py and "
+                                  "settings.py into the import graph of every "
+                                  "future reader of the project entity, for a "
+                                  "section project.py does not draw. ⚠ What "
+                                  "crosses is RENDERED CELLS, never the "
+                                  "arithmetic: C6 is BLOCKED on CC-2's Open "
+                                  "question 4, and a second module able to "
+                                  "compute a wage is a second place the OT "
+                                  "multiplier could be hardcoded"),
+    ("projectview", "settings", "ot_multiplier(), passed straight through to "
+                                "attendance.marking_cells(). ⚠ Read here rather "
+                                "than inside attendance.py because CC-2 requires "
+                                "the multiplier to be a SETTING and ot_amount() "
+                                "takes it as an argument for that reason — this "
+                                "page fetches it the same way /attendance/ does "
+                                "and performs no arithmetic of its own"),
+
+    # ── auth.py — the whole of what it may reach for (Phase 3B) ──────────
+    ("auth", "store",    "the shared STORE dict — users and roles are two "
+                         "collections in it, like every other record"),
+    ("auth", "pipeline", "esc. pipeline.py imports nothing from the app, which "
+                         "is what makes it safe from the bottom of the graph"),
+    ("auth", "branding", "the logo and company name on the login page"),
+
+    ("specpick", "store",    "STORE['specs'] — the library a pick is re-read from at POST"),
+    ("specpick", "pipeline", "esc and json_for_script — the embed goes through the "
+                             "shared helper, never a bare json.dumps (ABOUT.md §7.9e)"),
+
+    ("boqimport", "sheetimport", "the reader — bytes in, plain dicts out"),
+    ("boqimport", "boq",         "create_boq(imported=…), MAX_LINES and MAX_JSON_BYTES: "
+                                 "the prefilled form IS the ordinary one"),
+
+    ("address", "gst_lookup", "the GSTIN check, the portal lookup and the one "
+                              "pattern the form, the save and the lookup share"),
+
+    # 4 Oct 2026 — the two readers of the one billed predicate.
+    ("ra",      "dcbill", "billed_by() / billing_index(): a billed challan is "
+                          "left out of the /ra/create picker and refused on the "
+                          "POST, and SOURCE_KEY is the key create_ra() writes"),
+    ("challan", "dcbill", "billed_by() / billing_index(): the Billed in mark on "
+                          "/dc/view and the register, without importing ra.py"),
+]
+
+
+def test_db_imports_nothing_from_the_app():
+    """
+    What makes `chrome.py -> db.py` safe (and `dashboard.py -> db.py` before it).
+
+    chrome.py sits at the bottom of the graph and is imported BY every other
+    module, so anything it imports must import nothing of ours. db.py qualifies
+    — pymysql, dotenv and the standard library — and it has to keep qualifying,
+    because the persistence strip in `_nav()` is on every screen page in the app.
+    """
+    ours = {m.stem for m in REPO.glob("*.py")} - {"db"}
+    assert imports_of("db") & ours == set()
+
+
+def test_dcbill_imports_only_the_store():
+    """
+    The billed predicate's leaf, held as a WHITELIST (4 October 2026).
+
+    `series.py`'s standard: `store` and nothing else of ours. A blacklist has
+    to be remembered when a module is added; this catches the import nobody
+    thought of — and the moment the leaf reaches `ra.py` or `challan.py`, the
+    two modules it exists to keep apart are coupled through it.
+    """
+    ours = {m.stem for m in REPO.glob("*.py")} - {"dcbill"}
+    assert imports_of("dcbill") & ours == {"store"}
+    assert "flask" not in imports_of("dcbill")
+
+
+def test_measurement_reaches_auth_only_inside_its_raise_ra_button():
+    """
+    The narrowed `measurement -> auth` row's other half (4 October 2026).
+
+    The FORBIDDEN row now refuses a module-level import only, so this pins the
+    function-body hatch to the ONE function that needs it — `_raise_ra_btn()`,
+    which asks `auth.can_reach("ra.create_ra")` before drawing *Raise RA
+    (Installation)*. A second function importing `auth` here is a widening
+    nobody decided, and this goes red naming it.
+    """
+    tree = ast.parse((REPO / "measurement.py").read_text(encoding="utf8"))
+    hosts = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ""])
+            assert not any(n.split(".")[0] == "auth" for n in names), (
+                "measurement.py imports auth at MODULE level")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Import) and any(
+                        a.name.split(".")[0] == "auth" for a in sub.names):
+                    hosts.add(node.name)
+                if (isinstance(sub, ast.ImportFrom) and sub.module
+                        and sub.module.split(".")[0] == "auth"):
+                    hosts.add(node.name)
+    assert hosts == {"_raise_ra_btn"}, (
+        f"measurement.py reaches auth from {sorted(hosts)}; the one permitted "
+        f"host is _raise_ra_btn()")
+
+
+def test_demo_seed_imports_nothing_of_the_app_at_module_level():
+    """
+    The rule `demo_data.py` was held to, carried over to the module that
+    replaced it (October 2026): the seed's DATA sits at the bottom of the graph
+    beside `pipeline.py` and `branding.py`, so `boq.py` can read the sample
+    schedule for its demo fill and can never be half of a cycle.
+
+    `demo_seed.py` is also a DRIVER now — it writes the fictional company
+    through the routes, on a client it is handed — so it is not "imports
+    nothing at all". It is held instead to: nothing of ours at module level,
+    and exactly one function-body arrow, `db`, for the collection list the
+    empty-database check walks.
+    """
+    ours = {m.stem for m in REPO.glob("*.py")} - {"demo_seed"}
+    assert imports_of("demo_seed", top_level_only=True) & ours == set()
+    assert imports_of("demo_seed") & ours == {"db"}
+    assert "flask" not in imports_of("demo_seed")
+
+
+def test_only_the_demo_fill_reads_the_seed():
+    """
+    No application module SEEDS any more (October 2026): a fresh database is an
+    empty one, and the sample company is written by `tools/seed_demo.py`
+    through the routes. `boq.py` reads the seed for one thing — the sample
+    schedule `/boq/create?demo=1` loads into the EDITOR, never the database —
+    and a second reader would be a lazy seeder coming back.
+    """
+    readers = sorted(m.stem for m in REPO.glob("*.py")
+                     if m.stem != "demo_seed" and "demo_seed" in imports_of(m.stem))
+    assert readers == ["boq"], readers
+    assert "demo_seed" not in imports_of("boq", top_level_only=True), (
+        "boq.py reads the seed inside _demo_form_payload() only")
+
+
+def test_theme_imports_nothing_at_all():
+    """
+    `theme.py` (October 2026) is the SCREEN palette: hex values, the contrast
+    function and the `:root` block the shell emits. The app shell imports it,
+    the landing page imports it, and a module that imports nothing can be
+    imported by anything — so it holds `po_parts.py`'s standard.
+    """
+    assert imports_of("theme") == set()
+    assert "theme" in imports_of("chrome", top_level_only=True)
+    assert "theme" in imports_of("landing", top_level_only=True)
+
+
+def test_logo_imports_nothing_from_the_app():
+    """
+    `logo.py` (white-label, October 2026) encodes an uploaded logo into the
+    three sizes the app draws. `settings.py` imports it inside the upload
+    handler, so it holds `photo.py`'s standard: standard library and Pillow,
+    with Pillow inside the function so a server without it still boots.
+    """
+    stdlib = {"base64", "datetime", "io", "os", "warnings", "PIL"}
+    assert imports_of("logo") <= stdlib, imports_of("logo") - stdlib
+    assert "PIL" not in imports_of("logo", top_level_only=True)
+
+
+def test_the_public_landing_page_reaches_only_what_it_publishes():
+    """
+    `landing.py` is the one PUBLIC page that draws company content. Anything it
+    can import, it can put in front of an anonymous visitor — so it is held as a
+    WHITELIST: the identity (`branding`), the escaper (`pipeline`), the
+    published /settings content (`settings`) and the screen palette (`theme`,
+    which imports nothing). Nothing that holds a record.
+    """
+    ours = {m.stem for m in REPO.glob("*.py")} - {"landing"}
+    assert imports_of("landing") & ours == {"branding", "pipeline", "settings", "theme"}
+
+
+def test_po_parts_imports_nothing_at_all():
+    """
+    `po_parts.py` is held to the strictest standard in the repo — it imports
+    nothing at all — because it is a **data table**, not a component.
+
+    It holds the seeded prefill list for extra purchase-order lines — every
+    figure in it an assumed placeholder — and `purchase.py` reads it. Keeping it
+    at the very bottom of the graph is what makes that arrow free: a table that
+    imports nothing can never be half of a cycle, whoever picks it up next.
+
+    ⚠ It is deliberately NOT a collection in `STORE` and NOT persisted by
+      `db.py`, so it must not reach for either. The 29 August 2026 override
+      block records that decision: this is a typeahead prefill, not a parts
+      master, and a module that imported `store` would be the first step
+      towards becoming one.
+    """
+    assert imports_of("po_parts") == set()
+
+
+def test_photo_imports_nothing_from_the_app():
+    """
+    `photo.py` (26 September 2026) encodes and validates profile photos. Both
+    `auth.py` and `chrome.py` import it at module level, so it must sit at the
+    bottom of the graph: standard library and Pillow only. Pillow is imported
+    inside `encode()`, so a server without it still boots and says so.
+    """
+    stdlib = {"base64", "datetime", "io", "os", "re", "warnings", "PIL"}
+    assert imports_of("photo") <= stdlib, imports_of("photo") - stdlib
+    assert "PIL" not in imports_of("photo", top_level_only=True)
+
+
+def test_sheetimport_imports_nothing_from_the_app():
+    """
+    `sheetimport.py` (Import BOQ from Excel, 29 September 2026) is a LEAF: it
+    is handed bytes and returns plain dicts, and it must not reach for a
+    record, a route or a page. The standard library at module level, and the
+    two readers inside functions only — `photo.py`'s arrangement for Pillow,
+    so a server without them still boots.
+    """
+    ours = {m.stem for m in REPO.glob("*.py")} - {"sheetimport"}
+    assert imports_of("sheetimport") & ours == set(), imports_of("sheetimport") & ours
+    stdlib = {"datetime", "hashlib", "io", "json", "math", "re", "zipfile"}
+    assert imports_of("sheetimport", top_level_only=True) <= stdlib, (
+        imports_of("sheetimport", top_level_only=True) - stdlib)
+    assert {"openpyxl", "xlrd"} <= imports_of("sheetimport")
+
+
+def test_gst_lookup_reaches_only_the_store_and_pipeline():
+    """
+    `gst_lookup.py` (GSTIN auto-fill, 29 September 2026) is a LEAF: `store`
+    for the cache, `pipeline` for the State table — and otherwise the standard
+    library. Its network access is `urllib`, so it adds no dependency, and
+    `tests/test_gst_lookup.py` holds that no other module opens a connection.
+    """
+    ours = {m.stem for m in REPO.glob("*.py")} - {"gst_lookup"}
+    assert imports_of("gst_lookup") & ours == {"store", "pipeline"}
+    # `imports_of()` reports the top-level package: `http` is http.cookiejar,
+    # `urllib` is urllib.request / .error / .parse.
+    stdlib = {"http", "json", "os", "random", "re", "secrets", "threading",
+              "time", "urllib", "datetime", "pipeline", "store"}
+    assert imports_of("gst_lookup") <= stdlib, imports_of("gst_lookup") - stdlib
+
+
+def test_only_sheetimport_reads_a_workbook():
+    """
+    The runtime half of `tests/test_fixtures.py`'s old contract. Until
+    29 September 2026 NO module of the app imported openpyxl; from then on
+    exactly one does, and it is the leaf above. A second module reaching for a
+    workbook reader would be a second parser to keep in step.
+    """
+    readers = {"openpyxl", "xlrd", "defusedxml"}
+    offenders = sorted(m.stem for m in REPO.glob("*.py")
+                       if m.stem != "sheetimport" and imports_of(m.stem) & readers)
+    assert offenders == [], offenders
+
+
+def test_the_seeded_part_list_is_a_prefill_and_not_a_collection():
+    """
+    The shape of `po_parts.py`, asserted rather than trusted to a comment.
+
+    `purchase.py` may read the table; nothing may write it, and it must never
+    acquire the machinery of a record — no `STORE` key, no blueprint, no route.
+    The client asked for free-text lines and the owner chose free text; a parts
+    master is the thing this was explicitly decided against, and it would arrive
+    one import at a time.
+    """
+    src = (REPO / "po_parts.py").read_text(encoding="utf8")
+    tree = ast.parse(src)
+
+    # No route surface. Checked on the parsed source rather than on the text,
+    # so that the docstring saying "this is not a page" cannot fail the test
+    # that proves it.
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    names |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert "Blueprint" not in names, "a prefill table must not become a page"
+    assert "route" not in names, "a prefill table must not grow a route"
+
+    # No collection. `STORE` may be *named* in the prose — it says the table is
+    # deliberately not one — but it must never be reached for in code.
+    assert "STORE" not in names, "a prefill table must not become a collection"
+
+    assert "po_parts" in imports_of("purchase"), \
+        "purchase.py reads the seeded prefill list"
+
+
+def test_auth_imports_nothing_that_prints():
+    """
+    The direction that lets **every** module import `auth.py`.
+
+    Access control is needed at the bottom of the graph — `dashboard.py` asks it
+    whether to draw the Access card, and `dashboard.py` is imported by
+    everything. So `auth.py` has to be safe to import from anywhere, and that is
+    only true while its own module-level imports stay inside the set that is
+    already safe from there: the three bottom modules plus the standard library
+    and Werkzeug.
+
+    Stated as a whitelist rather than a blacklist on purpose. A new prohibition
+    has to be remembered; a whitelist catches the import nobody thought of.
+    """
+    # `chrome` joined the three on 14 September 2026: the app shell is a leaf
+    # that reaches `auth` only inside a function body, so importing it here is
+    # safe from the bottom of the graph — and it replaced the function-body
+    # import of `dashboard` that `_shell()` carried for the same chrome.
+    #
+    # `photo` joined on 26 September 2026: it imports nothing from the app at
+    # all (test_photo_imports_nothing_from_the_app), so it is as safe from the
+    # bottom of the graph as the standard library.
+    allowed = {"branding", "pipeline", "store", "chrome", "photo"}
+    ours = {m.stem for m in REPO.glob("*.py")} - {"auth"}
+    reached = imports_of("auth", top_level_only=True) & ours
+    assert reached <= allowed, (
+        f"auth.py imports {sorted(reached - allowed)} at module level. Every "
+        f"module in this app may import auth.py, so anything it reaches for is "
+        f"reached by all of them — and anything that prints would be a cycle "
+        f"through dashboard.py. Use a function-body import, as _nav_links() does.")
+
+
+def test_dashboard_asks_auth_before_drawing_the_access_card():
+    """
+    The other half: `dashboard.py` really does import `auth.py`.
+
+    The Users & Access card is the only way to reach user administration without
+    typing a URL, and it is drawn only for a holder of `admin.users`. If this
+    arrow ever went away the card would either vanish or, worse, show for
+    everybody — CLIENT_CHANGES-2.md is explicit that shipping a feature without
+    its entry point is a mistake this repo has already made once.
+    """
+    assert "auth" in imports_of("dashboard"), (
+        "dashboard.py no longer imports auth.py, so the module strip cannot ask "
+        "who is signed in")
+
+
+@pytest.mark.parametrize("module,required,why", REQUIRED)
+def test_module_imports(module, required, why):
+    assert required in imports_of(module), (
+        f"{module}.py is expected to import {required}.py for {why}"
+    )
+
+
+def test_boq_reads_ra_bills_without_importing_ra():
+    """
+    The one-way trick, verified on both halves.
+
+    `quotation.py` links to proformas with `url_for` and reads
+    `STORE["proformas"]` directly, which is what keeps that arrow one-way.
+    `boq.py` does the same for RA bills, and the test checks both that the
+    read is there and that the import is not.
+    """
+    src = (REPO / "boq.py").read_text(encoding="utf8")
+    assert "ra_bills" in src, "boq.py should read STORE['ra_bills'] directly"
+    assert 'url_for("ra.' in src, "boq.py should link to RA bills with url_for"
+    assert "ra" not in imports_of("boq")
+
+
+def test_ra_reads_receipts_without_importing_receipt():
+    """
+    The one-way trick, one link further down again — now five times over.
+
+    `ra.view_ra()` renders a receipts panel and offers "Record a payment", so it
+    needs both the data and the link. It takes the data straight out of
+    `STORE["receipts"]` and builds the link with `url_for`, which is what lets
+    `receipt.py` import `ra.py` rather than the reverse.
+
+    That direction is not a preference. `create_ra()` has to freeze the carried
+    balance at the moment a bill is saved, so the arithmetic has to sit upstream
+    of the module that records the payments.
+    """
+    src = (REPO / "ra.py").read_text(encoding="utf8")
+    assert "receipts" in src, "ra.py should read STORE['receipts'] directly"
+    assert 'url_for("receipt.' in src, "ra.py should link to receipts with url_for"
+    assert "receipt" not in imports_of("ra")
+
+
+def test_boq_reads_challans_without_importing_challan():
+    """
+    The one-way trick, used a sixth time.
+
+    `/boq/view`'s action bar offers **+ Delivery Challan** on the tip of a
+    revision chain, built with `url_for` exactly as the RA links and the draft
+    PO link beside it are. `boq.py` may never import a module that imports it.
+    """
+    src = (REPO / "boq.py").read_text(encoding="utf8")
+    assert 'url_for("challan.' in src, "boq.py should link to challans with url_for"
+    assert "challan" not in imports_of("boq")
+
+
+def test_the_two_consumers_of_the_picker_do_not_know_about_each_other():
+    """
+    What the extraction is *for*, asserted directly.
+
+    `po_draft.py` and `challan.py` render the same grid. The point of lifting
+    it into a leaf is that neither has to know the other exists — if either
+    imported the other, the shared component would be a shared component in
+    name and a dependency in fact.
+    """
+    assert "challan" not in imports_of("po_draft")
+    assert "po_draft" not in imports_of("challan")
+    for mod in ("po_draft", "challan"):
+        assert "boqpick" in imports_of(mod), f"{mod}.py no longer uses the leaf"
+
+
+def test_the_picker_owns_the_grid_the_two_documents_share():
+    """
+    Where the functions live is what makes the import direction possible, so it
+    is asserted rather than left to convention — `test_the_balance_arithmetic_
+    lives_upstream_in_ra`'s argument, one module over. Moving any of these back
+    into a consumer forces the other to import it.
+    """
+    import boqpick
+
+    for name in ("families", "line_ids", "rows_html", "grid_html", "js",
+                 "picked_lines", "PICKER_CSS"):
+        assert hasattr(boqpick, name), (
+            f"boqpick.{name} moved — both consumers depend on it being here")
+
+
+def test_the_draft_and_the_real_po_link_without_importing_each_other():
+    """
+    The one-way trick, used a seventh time — and this one runs in **both**
+    directions at once, which is what makes it worth its own test.
+
+    `/purchase/from-draft/<id>` reads a draft PO out of `STORE["purchase_orders"]`
+    and writes `converted_po_ids` back onto it. `/po/view` and `/po/` read that
+    list and link to `/purchase/view/<id>`. Neither module imports the other, and
+    neither may: they are sibling document modules with different record shapes,
+    different number series and — the client constraint that created the split in
+    the first place — different rules about GST.
+
+    The route lives in `purchase.py` rather than `po_draft.py` because it writes
+    a `purchases` record, and a module owns the shape it writes.
+    """
+    assert "po_draft" not in imports_of("purchase")
+    assert "purchase" not in imports_of("po_draft")
+
+    pur = (REPO / "purchase.py").read_text(encoding="utf8")
+    assert "purchase_orders" in pur, (
+        "purchase.py should read STORE['purchase_orders'] directly")
+    assert 'url_for("po_draft.' in pur, (
+        "purchase.py should link back to the draft with url_for")
+
+    draft = (REPO / "po_draft.py").read_text(encoding="utf8")
+    assert "converted_po_ids" in draft, (
+        "po_draft.py should read the converted_po_ids purchase.py writes")
+    assert 'url_for("purchase.' in draft, (
+        "po_draft.py should link to the real PO with url_for")
+
+
+def test_the_project_is_reached_through_the_store_and_url_for():
+    """
+    `project.py` is a **permitted** import for `purchase.py` and is deliberately
+    not taken: the project link is one id, one name and one `url_for`, and
+    nothing in `project.py`'s API is needed to carry them.
+
+    The direction that is not optional is the reverse — `project.py` is a leaf
+    and may never import `purchase.py`, which the FORBIDDEN table above already
+    asserts. This is the half that says why the arrow is absent rather than
+    leaving a reader to guess it was forgotten.
+    """
+    pur = (REPO / "purchase.py").read_text(encoding="utf8")
+    assert '"projects"' in pur, "purchase.py should read STORE['projects'] directly"
+    assert 'url_for("projectview.' in pur, (
+        "purchase.py should link to the project's page with url_for")
+    assert "purchase" not in imports_of("project")
+
+
+def test_the_picker_is_shared_by_three_documents_now():
+    """
+    `boqpick.py` was extracted at its second consumer rather than its fourth,
+    on the reasoning that three copies is where `docsheet.py` found four
+    letterheads that had already drifted apart. The third consumer has arrived
+    and did not write a fourth copy — which is the extraction paying for itself.
+    """
+    for mod in ("po_draft", "challan", "purchase"):
+        assert "boqpick" in imports_of(mod), f"{mod}.py no longer uses the leaf"
+    # And the leaf still knows about none of them.
+    for mod in ("po_draft", "challan", "purchase"):
+        assert mod not in imports_of("boqpick")
+
+
+def test_the_balance_arithmetic_lives_upstream_in_ra():
+    """
+    Where the functions live is the thing that makes the import direction
+    possible, so it is asserted rather than left to convention. Moving any of
+    these into receipt.py forces `ra -> receipt` and the cycle with it.
+    """
+    import ra
+
+    for name in ("receipts_for", "received_against", "outstanding_of",
+                 "previous_balance", "prev_balance_drift"):
+        assert hasattr(ra, name), f"ra.{name}() moved — the import direction depends on it"
+
+
+def test_measurement_may_import_settings_because_it_now_OWNS_a_settings_record():
+    """
+    ⚠ The row banning `measurement -> settings` was removed on 6 September 2026.
+    This is the check that replaces it, and it is deliberately three separate
+    assertions rather than a comment, because each half of the old reason has to
+    stay false for the arrow to stay safe.
+
+    1. **No cycle.** Nothing reachable from `settings.py` imports
+       `measurement.py`. The moment that changes, this fails and the arrow has
+       to go back.
+    2. **The premise really has changed.** The ban's stated reason was that
+       measurement "owns no /settings counter". It now owns the joint sheet's
+       column definitions there.
+    3. **It is the established pattern.** Two sibling BOQ-chain documents
+       already take the same arrow for the same kind of record.
+    """
+    # 1 — the cycle, walked rather than asserted from memory.
+    seen, stack = set(), ["settings"]
+    while stack:
+        mod = stack.pop()
+        if mod in seen:
+            continue
+        seen.add(mod)
+        for dep in imports_of(mod):
+            if (REPO / f"{dep}.py").exists():
+                stack.append(dep)
+    assert "measurement" not in seen, (
+        "settings.py now reaches measurement.py, so measurement -> settings is "
+        "a real cycle and the ban must be restored")
+
+    # 2 — measurement owns a /settings record, which is why it reads one.
+    import settings as ST
+    assert hasattr(ST, "measurement_columns")
+    assert hasattr(ST, "MEASUREMENT_COLUMNS_RECORD")
+    assert len(ST.DEFAULT_MEASUREMENT_COLUMNS) == 8
+
+    # 3 — the precedent this follows.
+    assert "settings" in imports_of("challan")
+    assert "settings" in imports_of("po_draft")

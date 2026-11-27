@@ -1,0 +1,1236 @@
+"""
+Extra free-text lines on a purchase order.
+
+⚠ **THIS IS NOT ONE OF CLIENT_CHANGES-2.md's TWENTY PHASE 3 ITEMS**, and this
+file says so first because the mistake is cheap to make and expensive to
+correct. It is a client request made *after* the 19 August 2026 meeting that
+produced that list, it carries no 3A/3B/3C tag, and it is priced in neither
+MG/DP/2026-01 nor MG/DP/2026-02. Built under the **29 August 2026 OVERRIDE**
+block in `CLIENT_CHANGES.md` §0, which records it as new unpriced scope and
+forbids counting it toward the board.
+
+### The requirement
+
+BOQ items are not enough. When raising a purchase order the client needs to ask
+the vendor for additional parts that appear nowhere on the BOQ. He sent a list
+of those parts with **no prices and no units**, and wants assumed prices seeded
+so that a real order can go out today and be corrected later.
+
+### The shape, which the owner chose and this file pins
+
+**Extra lines are free text typed onto each order.** No parts master, no
+catalogue collection, no picker, no per-vendor rate table. `po_parts.py` is a
+**typeahead prefill and nothing else** — every rate in it an assumed
+placeholder, expected to be overwritten.
+
+### The three things that must not be conflated
+
+There are **three** concepts on this record, not two:
+
+    line_items   BOQ-derived / catalogue lines, carry a `line_id`  → subtotal
+    extra_lines  free-text parts, carry NO `line_id`               → subtotal
+    charges      A3's labelled repeater (loading, freight)         → taxable_value
+
+An extra line is a **line**, not a charge: it is goods this company is buying
+from this vendor, so it sits inside `subtotal` exactly where a `line_items` row
+sits. A charge is what the vendor bills us *beyond* the goods and joins one
+step later. Getting that wrong produces the right grand total by the wrong
+route and prints it in the wrong place on the sheet.
+
+`test_the_worked_example` is the load-bearing test here: it puts all three on
+one order at once and asserts every figure.
+"""
+
+import pytest
+
+import address
+import po_parts as PP
+import purchase as PU
+from store import STORE
+
+
+
+def _create(client, *, rate="1000", qty="10", status="Draft", cgst="9",
+            tax_type="cgst_sgst", extras=(), charges=()):
+    """
+    Raise an order through the real route.
+
+    `extras` is `[(desc, unit, qty, rate, disc), ...]`, posted the way the
+    browser posts the repeater: five parallel lists. `charges` is A3's
+    `[(label, amount, taxable), ...]`.
+    """
+    seed_baseline("products")
+    seed_baseline("addresses")
+    pid = sorted(STORE["products"])[0]
+
+    data = {
+        "date": "2026-04-18", "vendor_id": demo_address_id("supplier_civil"), "status": status,
+        "tax_type": tax_type, "cgst_rate": cgst, "igst_rate": "0",
+        "line_product_id": pid, "line_qty": qty,
+        "line_rate": rate, "line_discount": "",
+        "extra_desc":     [str(e[0]) for e in extras],
+        "extra_unit":     [str(e[1]) for e in extras],
+        "extra_qty":      [str(e[2]) for e in extras],
+        "extra_rate":     [str(e[3]) for e in extras],
+        "extra_discount": [str(e[4]) for e in extras],
+        "charge_label":  [c[0] for c in charges],
+        "charge_amount": [str(c[1]) for c in charges],
+    }
+    for n, c in enumerate(charges):
+        if c[2]:
+            data[f"charge_taxable_{n}"] = "1"
+    return client.post("/purchase/create", data=data)
+
+
+def _po(client, **kw):
+    r = _create(client, **kw)
+    assert r.status_code == 302, "the order was not created"
+    return list(STORE["purchases"].values())[0]
+
+
+# ══ 1. The worked example — all three concepts on one order ═══════════════
+
+def test_the_worked_example(client):
+    """
+    **The arithmetic, end to end, with all three kinds of money present.**
+
+        1 item @ 10,000 x 1              10,000.00   line_items
+        Bullet fastener 8mm  100 @ 12  +  1,200.00   extra_lines  ← a LINE
+        Cutting disc 4 inch  20 @ 45  +    900.00   extra_lines  ← a LINE
+                                       ───────────
+        Sub Total                        12,100.00   ← extra lines are INSIDE it
+        Loading & Unloading            +  1,500.00   charges, taxable
+                                       ───────────
+        Taxable Value                    13,600.00   ← tax computes on THIS
+        CGST @ 9%                      +  1,224.00
+        SGST @ 9%                      +  1,224.00
+                                       ───────────
+        Order Value                      16,048.00
+
+    Every one of those figures is asserted.
+
+    **The counterfactual, because the difference is the point.** Route the two
+    extra lines through `_parse_charges()` instead — the tempting merge, since
+    both are "money that was not on the schedule" — and the *grand total* comes
+    out identical at 16,048.00 while `subtotal` reads **10,000** instead of
+    12,100. The order would then print a Sub Total that does not include goods
+    it is ordering, with 2,100 rupees of parts appearing under the totals as
+    though the vendor were billing us a fee. **The total hides the error; the
+    printed sheet does not.** That is why they enter at different points.
+    """
+    po = _po(client, rate="10000", qty="1", extras=[
+        ("Bullet fastener 8mm", "Nos", "100", "12", ""),
+        ("Cutting disc 4 inch", "Nos", "20", "45", ""),
+    ], charges=[("Loading & Unloading", "1500", True)])
+
+    assert po["subtotal"] == 12100.00
+    assert PU.extra_lines_total(po["extra_lines"]) == 2100.00
+    assert po["taxable_value"] == 13600.00
+    assert po["tax_info"]["CGST"] == 1224.00
+    assert po["tax_info"]["SGST"] == 1224.00
+    assert po["grand_total"] == 16048.00
+
+    # The counterfactual, asserted rather than described: had the extra lines
+    # gone in as charges, subtotal would have stayed at the item total.
+    assert po["subtotal"] != 10000.00, \
+        "extra lines belong INSIDE subtotal, not after it with the charges"
+
+
+# ══ 2. It reaches the record and the printed order ════════════════════════
+
+def test_an_extra_line_reaches_the_stored_record(client):
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "130", "")])
+    assert len(po["extra_lines"]) == 1
+    row = po["extra_lines"][0]
+    assert row["description"] == "Measuring tape 5 m"
+    assert row["unit"] == "Nos"
+    assert row["qty"] == 4.0
+    assert row["rate"] == 130.0
+    assert row["total"] == 520.00
+
+
+def test_an_extra_line_reaches_the_printed_order(client):
+    """It prints as a line in the items table, not as a note under the totals."""
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "130", "")])
+    html = client.get(f"/purchase/view/{po['id']}").get_data(as_text=True)
+    assert "Measuring tape 5 m" in html
+    # In the items table, on an ordinary item row — the same class a
+    # `line_items` row uses, because it is the same kind of thing.
+    body = html.split('<div class="items-wrap">')[1]
+    assert "Measuring tape 5 m" in body, "an extra line belongs in the items table"
+
+
+def test_the_subtotal_includes_the_extra_line(client):
+    """`subtotal` is the sum of the lines, and an extra line IS a line."""
+    plain = _po(client, rate="1000", qty="10")
+    assert plain["subtotal"] == 10000.00
+
+    STORE["purchases"].clear()
+    withx = _po(client, rate="1000", qty="10",
+                extras=[("Masking tape 1 inch", "Nos", "5", "90", "")])
+    assert withx["subtotal"] == 10450.00
+    assert withx["total_qty"] == 15.0, \
+        "extra lines are quantities of goods and count toward the order's qty"
+
+
+# ══ 3. The discount, and that it is inside the tax base ═══════════════════
+
+def test_a_discount_on_an_extra_line_reduces_the_tax_base(client):
+    """
+    A2's rule, applied to an extra line: **the discount is inside the base.**
+
+    100 @ 12 = 1,200 less 25% = 900. That 900 is what lands in `total`, so it
+    is what `subtotal` sums, and `subtotal` is the first term the tax is
+    computed from. Taxing 1,200 would overstate the input credit we tell the
+    vendor to bill — the same reasoning `_line_total()` carries for item rows,
+    reached through the same function rather than a second copy of it.
+    """
+    # The item line is present but free, so the whole tax base is the extra
+    # line and the arithmetic below has nothing else in it.
+    po = _po(client, rate="0", qty="1", cgst="9",
+             extras=[("Bullet fastener 8mm", "Nos", "100", "12", "25")])
+    row = po["extra_lines"][0]
+    assert row["discount_pct"] == 25.0
+    assert row["total"] == 900.00, "rounded once, on the discounted product"
+
+    assert po["subtotal"] == 900.00
+    assert po["taxable_value"] == 900.00
+    assert po["tax_info"]["CGST"] == 81.00, "9% of 900, not of 1,200"
+
+    # The counterfactual: undiscounted, the base would be 1,200 and the CGST
+    # 108.00 — 27 rupees of input credit on one line, on a price nobody is
+    # paying. That is what "the discount is inside the base" buys.
+    assert po["tax_info"]["CGST"] != 108.00
+
+
+def test_the_discount_arithmetic_is_the_same_function_as_the_item_rows(client):
+    """
+    Not a second copy of `_line_total()`, and not a second copy of
+    `_parse_discount()` either.
+
+    Asserted by result rather than by reading the source: an extra line and an
+    item line with the same qty, rate and discount must produce the identical
+    amount, to the paisa, including the rounding.
+    """
+    po = _po(client, rate="1234.56", qty="7", extras=[
+        ("Some part nobody has heard of", "Nos", "7", "1234.56", "13.5")])
+    item = [r for r in po["line_items"] if not r.get("is_header")][0]
+    # The item row carries no discount; compute what one with 13.5% would be.
+    assert po["extra_lines"][0]["total"] == PU._line_total(1234.56, 7, 13.5)
+    assert item["total"] == PU._line_total(1234.56, 7, 0)
+
+
+# ══ 4. NO line_id. Ever. ══════════════════════════════════════════════════
+
+def test_an_extra_line_carries_no_line_id(client):
+    """
+    **`line_id` is a BOQ identity and an extra line has no BOQ ancestor.**
+
+    Not "is empty" — **absent**. `/purchase/from-boq` matches a row back to a
+    schedule on this key (ABOUT.md §2f, and the ₹1,99,122.50 that matching on
+    `item_no` once cost). A free-text part is on no schedule, so minting one
+    would make it claim an ancestry it does not have, and any code walking PO
+    lines by `line_id` would silently pick it up.
+    """
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "130", "")])
+    for row in po["extra_lines"]:
+        assert "line_id" not in row, \
+            "an extra line must not carry a line_id, not even a blank one"
+
+
+def test_no_code_reads_line_id_unguarded_over_po_lines():
+    """
+    The other half of the rule: nothing may assume the key is there.
+
+    Every read of `line_id` in `purchase.py` goes through `.get()` or
+    `BQ._line_id()`, both of which tolerate absence. A bare `row["line_id"]`
+    would raise a KeyError the first time an order carrying an extra line met
+    it, which is the failure this test exists to make impossible to introduce.
+    """
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "purchase.py").read_text(encoding="utf8")
+    for bad in ('["line_id"]', "['line_id']"):
+        assert bad not in src, (
+            f"purchase.py subscripts line_id directly ({bad}). An extra line "
+            f"has no line_id, so every read of it must be .get()-guarded.")
+
+
+# ══ 5. Blank rows, and rows with no rate ══════════════════════════════════
+
+def test_an_all_blank_row_is_dropped_silently(client):
+    """
+    The editor opens with three blank rows on purpose, and an untouched one is
+    not a mistake to shout about — `_parse_lines()`'s own contract.
+    """
+    po = _po(client, extras=[
+        ("", "", "", "", ""),
+        ("Measuring tape 5 m", "Nos", "4", "130", ""),
+        ("", "", "", "", ""),
+    ])
+    assert len(po["extra_lines"]) == 1
+    assert po["extra_lines"][0]["description"] == "Measuring tape 5 m"
+
+
+def test_a_description_with_no_rate_is_kept_and_shown_as_incomplete(client):
+    """
+    **This is the client's actual case**, so it is kept rather than refused: he
+    sent a list of parts with no prices at all. The row stores rate 0 and the
+    printed order flags it in the same amber the blank-HSN guard uses, because
+    the vendor is being asked to price it.
+    """
+    po = _po(client, extras=[("Some unpriced thing", "Nos", "5", "", "")])
+    assert len(po["extra_lines"]) == 1
+    row = po["extra_lines"][0]
+    assert row["rate"] == 0.0
+    assert row["total"] == 0.0
+    assert row["rate_is_assumed"] is False, \
+        "no rate means nothing was assumed — there is no figure to assume"
+
+    html = client.get(f"/purchase/view/{po['id']}").get_data(as_text=True)
+    assert "Some unpriced thing" in html
+    assert "todo-chip" in html, "an unpriced line must be flagged as incomplete"
+
+
+def test_a_figure_with_no_description_is_refused(client):
+    """
+    A figure on a purchase order that does not say what it is for is exactly
+    what a vendor queries. Same refusal `_parse_charges()` makes.
+    """
+    r = _create(client, extras=[("", "Nos", "10", "500", "")])
+    assert r.status_code == 200, "the form should re-render, not redirect"
+    assert "no description" in r.get_data(as_text=True)
+    assert not STORE["purchases"], "nothing may be written on a refused POST"
+
+
+def test_a_negative_rate_is_refused(client):
+    r = _create(client, extras=[("Measuring tape 5 m", "Nos", "4", "-130", "")])
+    assert r.status_code == 200
+    assert "cannot be negative" in r.get_data(as_text=True)
+    assert not STORE["purchases"]
+
+
+# ══ 6. The assumed-rate marker ════════════════════════════════════════════
+#
+# ⚠ **THE RULE WAS NARROWED ON 14 SEPTEMBER 2026, by the owner, in his words:
+#   "if I have entered price it is not a placeholder."** An order raised that
+#   morning carried `Plywood 12 mm` at ₹1,350 and `GI stud 75 mm` at ₹175 —
+#   both entered, both the seeded figures, both chipped "placeholder · not
+#   quoted" under the old rule, which marked any rate EQUAL to the seed however
+#   it got into the box. The owner rejected that as a false statement about a
+#   price he had chosen.
+#
+#   The rule now: `rate_is_assumed` is true when — and only when — the rate
+#   box was posted BLANK and the server filled it. A figure in the box on
+#   submit is the operator's price, the seeded figure included. Still derived
+#   on the server, still from no hidden field: the mark IS the fill.
+#
+#   Two halves follow from that and both are pinned below. The form must never
+#   write the seed into the box's VALUE — it is offered as ghost text and
+#   `data-seed` — because a written value would post as an entered price and
+#   the mark could never be set. And a stored placeholder line must come back
+#   to the edit form with a BLANK box, or resaving the order would silently
+#   turn every placeholder on it into a price.
+
+def _edit(client, po, extras, line_rate="1000"):
+    """
+    Resave through `/purchase/edit/<id>` with the item row unchanged and the
+    extra repeater as given — the same five parallel lists `_create()` posts.
+    """
+    return client.post(f"/purchase/edit/{po['id']}", data={
+        "line_rate": line_rate, "line_discount": "",
+        "extra_desc":     [str(e[0]) for e in extras],
+        "extra_unit":     [str(e[1]) for e in extras],
+        "extra_qty":      [str(e[2]) for e in extras],
+        "extra_rate":     [str(e[3]) for e in extras],
+        "extra_discount": [str(e[4]) for e in extras],
+    })
+
+
+def test_the_prefill_sets_rate_is_assumed(client):
+    """
+    A seeded part with the rate box left BLANK is filled and marked. The mark
+    says "the server put this figure here and nobody has typed one", which is
+    the whole of what it claims.
+    """
+    _canon, unit, seeded = PP.lookup("Measuring tape 5 m")
+    po = _po(client, extras=[("Measuring tape 5 m", unit, "4", "", "")])
+    assert po["extra_lines"][0]["rate"] == seeded
+    assert po["extra_lines"][0]["rate_is_assumed"] is True
+
+
+def test_an_edited_rate_clears_the_assumed_mark(client):
+    """
+    A figure in the box is a price. Derived on the server from the posted box
+    rather than remembered in a hidden field, so a stale or tampered form
+    cannot set or clear the mark independently of the figure.
+    """
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "155", "")])
+    assert po["extra_lines"][0]["rate_is_assumed"] is False
+    assert po["extra_lines"][0]["rate"] == 155.0
+
+
+def test_a_part_that_is_on_no_seed_list_is_never_marked_assumed(client):
+    po = _po(client, extras=[("Entirely bespoke bracket", "Nos", "2", "999", "")])
+    row = po["extra_lines"][0]
+    assert row["rate_is_assumed"] is False
+    assert row["description"] == "Entirely bespoke bracket", \
+        "free text is accepted exactly as typed — this is not a vocabulary"
+
+
+def test_the_assumed_chip_never_appears_in_the_printed_output(client):
+    """
+    ⚠ **The vendor receives the order; the vendor does not receive our note that
+      we invented the price.**
+
+    Two things are asserted, because either alone would be a false comfort:
+    the chip is on the screen page at all (otherwise the test passes for the
+    wrong reason), and the stylesheet takes it out at print.
+    """
+    _c, unit, seeded = PP.lookup("Measuring tape 5 m")
+    po = _po(client, extras=[("Measuring tape 5 m", unit, "4", "", "")])
+    html = client.get(f"/purchase/view/{po['id']}").get_data(as_text=True)
+
+    assert "xl-assumed" in html, "the chip must render on screen"
+    # Rewritten on 29 August 2026 when the chip wording changed. The previous
+    # assertion was, verbatim:
+    #
+    #     assert "assumed" in html
+    #
+    # It never failed and never could: `xl-assumed` is the CLASS name, so the
+    # substring was in the page whatever the chip said — it would have passed
+    # against a chip reading "verified market price". The text is asserted now.
+    assert "placeholder &middot; not quoted" in html,         "the chip must say the figure is a placeholder nobody has quoted"
+
+    # ...and must be removed at print by a rule, not by hope.
+    assert "@media print { .xl-assumed { display:none !important; } }" in html, \
+        "the assumed chip must be display:none at print"
+
+
+def test_an_order_with_no_assumed_rate_draws_no_chip(client):
+    po = _po(client, extras=[("Entirely bespoke bracket", "Nos", "2", "999", "")])
+    html = client.get(f"/purchase/view/{po['id']}").get_data(as_text=True)
+    assert '<span class="xl-assumed">' not in html
+
+
+def test_the_owners_own_case_draws_no_chip(client):
+    """
+    **The order that produced the ruling.** `Plywood 12 mm` at 1,350 and
+    `GI stud 75 mm` at 175, both entered in the box, both exactly the seeded
+    figures — and neither is a placeholder, because somebody entered them.
+    """
+    for desc in ("Plywood 12 mm", "GI stud 75 mm"):
+        assert PP.lookup(desc), f"{desc!r} must still be a seeded part for this to test anything"
+    f_seed, w_seed = PP.lookup("Plywood 12 mm")[2], PP.lookup("GI stud 75 mm")[2]
+    po = _po(client, extras=[("Plywood 12 mm", "Nos", "3", str(f_seed), ""),
+                             ("GI stud 75 mm", "Mtr", "2", str(w_seed), "")])
+    assert [r["rate_is_assumed"] for r in po["extra_lines"]] == [False, False]
+    assert [r["rate"] for r in po["extra_lines"]] == [f_seed, w_seed]
+    html = client.get(f"/purchase/view/{po['id']}").get_data(as_text=True)
+    assert '<span class="xl-assumed">' not in html
+
+
+def test_a_stored_placeholder_line_reopens_with_a_blank_box_and_the_seed_greyed(client):
+    """
+    The edit form draws a placeholder line with the rate box EMPTY and the
+    seeded figure as the input's `placeholder` and `data-seed` — an offered
+    figure, visibly not an entered one. A line somebody priced comes back with
+    its figure in the box.
+    """
+    _c, _u, seeded = PP.lookup("Measuring tape 5 m")
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "", ""),
+                             ("Entirely bespoke bracket", "Nos", "2", "999", "")])
+    assert po["extra_lines"][0]["rate_is_assumed"] is True
+    html = client.get(f"/purchase/edit/{po['id']}").get_data(as_text=True)
+
+    assert (f'name="extra_rate" value=""\n'
+            f'                 min="0" step="0.01" placeholder="{seeded:.2f}"\n'
+            f'                 data-seed="{seeded:.2f}"') in html, \
+        "a placeholder line must reopen with a blank box and the seed greyed in it"
+    assert f'name="extra_rate" value="{seeded:.2f}"' not in html, \
+        "the seeded figure must never be written into the box's value"
+    assert ('name="extra_rate" value="999.00"\n'
+            '                 min="0" step="0.01" placeholder="Rate"\n'
+            '                 data-seed=""') in html, \
+        "an entered rate reopens as entered, with no seed offered"
+
+
+def test_resaving_the_edit_form_keeps_a_placeholder_a_placeholder(client):
+    """
+    Open the reprice form and save it without touching the extra line: the box
+    posts blank, the server fills it again, and the mark stays. Nothing
+    somebody did not type becomes a price by being saved twice.
+    """
+    _c, _u, seeded = PP.lookup("Measuring tape 5 m")
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "", "")])
+    r = _edit(client, po, [("Measuring tape 5 m", "Nos", "4", "", "")])
+    assert r.status_code == 302, r.get_data(as_text=True)[:600]
+    row = po["extra_lines"][0]
+    assert row["rate"] == seeded
+    assert row["rate_is_assumed"] is True
+
+
+def test_typing_the_seeded_figure_on_the_edit_form_makes_it_a_price(client):
+    """
+    The owner's case on the reprice form: the placeholder is kept as the price
+    by typing it. Same figure, different fact — somebody entered it.
+    """
+    _c, _u, seeded = PP.lookup("Measuring tape 5 m")
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "", "")])
+    assert po["extra_lines"][0]["rate_is_assumed"] is True
+    r = _edit(client, po, [("Measuring tape 5 m", "Nos", "4", str(seeded), "")])
+    assert r.status_code == 302
+    row = po["extra_lines"][0]
+    assert row["rate"] == seeded
+    assert row["rate_is_assumed"] is False
+    html = client.get(f"/purchase/view/{po['id']}").get_data(as_text=True)
+    assert '<span class="xl-assumed">' not in html
+
+
+def test_no_form_writes_the_seed_into_the_rate_box(client):
+    """
+    Both halves of the form's side of the rule, asserted as strings because
+    the repo runs no JavaScript (§8 below):
+
+    - the live preview offers the seed as ghost text and `data-seed`, and the
+      line that used to write `rate.value = hit.r...` is gone;
+    - a row the server renders for a seeded part with a blank rate — here a
+      rejected POST coming back with what was typed — carries the seed the
+      same way, so the offer is there with JavaScript off too.
+    """
+    _c, _u, seeded = PP.lookup("Measuring tape 5 m")
+    for url in ("/purchase/create",):
+        html = client.get(url).get_data(as_text=True)
+        assert "rate.placeholder = hit ? hit.r.toFixed(2) : 'Rate'" in html
+        assert "rate.dataset.seed = hit ? hit.r.toFixed(2) : ''" in html
+        assert "rate.value = hit.r" not in html, \
+            "the seeded rate must never be written into the box's value"
+        assert "parseFloat(rEl.dataset.seed)" in html, \
+            "the amount preview must read the offered figure for a blank box"
+
+    # A rejected POST (a figure with no description on row 2) re-renders row 1
+    # as typed: seeded part, blank box, seed greyed.
+    r = _create(client, extras=[("Measuring tape 5 m", "", "4", "", ""),
+                                ("", "Nos", "1", "50", "")])
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert (f'name="extra_rate" value=""\n'
+            f'                 min="0" step="0.01" placeholder="{seeded:.2f}"\n'
+            f'                 data-seed="{seeded:.2f}"') in html
+
+
+# ══ 7. The seed table itself ══════════════════════════════════════════════
+
+def test_an_alias_prefills_the_same_rate_as_its_canonical_name():
+    """
+    The client's list had duplicates and typos. Both spellings must reach the
+    same row, or the operator has to know which one is the "real" one.
+    """
+    for alias, canonical in [
+        ("Modular soket 16A",            "Modular socket 16A"),
+        ("Bullet Fastner 8mm",    "Bullet fastener 8mm"),
+        ("Lather hand gloves",    "Leather hand gloves"),
+        ("Plywood 12MM", "Plywood 12 mm"),
+        ("Angel cock 15 mm", "Angle cock 15 mm"),
+        ("4\" Cutting disc",     "Cutting disc 4 inch"),
+        ("Cutting disc",         "Cutting disc 4 inch"),
+        ("MCB 16a SP",            "MCB 16A SP"),
+        ("Thinner 5ltr",      "Thinner 5 ltr"),
+        ("Copper wire 1.5 sqmm coil", "Copper wire 1.5 sq mm coil"),
+        ("Solvant cement 100 ml",   "Solvent cement 100 ml"),
+        ("Safety shoes 10no",     "Safety shoes"),
+    ]:
+        assert PP.lookup(alias) == PP.lookup(canonical), \
+            f"{alias!r} must prefill the same rate as {canonical!r}"
+
+
+def test_an_alias_prefills_through_the_form_too(client):
+    """
+    The alias is not just a lookup nicety: a line typed with the client's own
+    spelling must be marked assumed at the canonical rate, or the mark would
+    quietly depend on how somebody spelled it.
+    """
+    _c, _u, seeded = PP.lookup("Bullet fastener 8mm")
+    po = _po(client, extras=[("Bullet Fastner 8mm", "Nos", "10", "", "")])
+    assert po["extra_lines"][0]["rate"] == seeded
+    assert po["extra_lines"][0]["rate_is_assumed"] is True
+    assert po["extra_lines"][0]["description"] == "Bullet Fastner 8mm", \
+        "what was typed is what is stored — the alias resolves the RATE, not the text"
+
+
+def test_no_part_is_seeded_twice():
+    """
+    Duplicates were to be resolved into `aliases`, not seeded as two rows. A
+    part with two entries would carry two different assumed rates and prefill
+    whichever the dict happened to reach first.
+    """
+    seen = {}
+    for canonical, row in PP.PARTS.items():
+        for key in [canonical] + list(row.get("aliases") or []):
+            norm = PP._norm(key)
+            assert norm not in seen or seen[norm] == canonical, (
+                f"{key!r} maps to both {seen.get(norm)!r} and {canonical!r}")
+            seen[norm] = canonical
+
+
+def test_the_grade_variants_are_kept_apart():
+    """
+    `Emulsion paint` and `Emulsion paint premium` are different goods at
+    different rates, and the list drew the distinction itself — so do the two
+    wall puttys. Folding either pair would lose it.
+    """
+    assert PP.lookup("Wall putty 20 kg")[2] !=         PP.lookup("Wall putty premium 20 kg")[2]
+    assert PP.lookup("Emulsion paint 20 ltr")[2] !=         PP.lookup("Emulsion paint premium 20 ltr")[2]
+
+
+def test_the_open_question_is_left_open_and_not_answered_by_a_rename():
+    """
+    ⚠ **An OPEN QUESTION, pinned so it cannot be closed by accident.**
+
+    `25mm conduit bend` and `1" conduit bend` may be one part written two ways
+    or two parts bought separately. The list does not say, so the module must
+    not say either: both stay seeded under their own names, with their own
+    rates, and neither may reach the other through an alias or a rename. When
+    the purchasing team answers, change the entries here and delete this test
+    with the commit that does it, not before.
+    """
+    assert "25mm conduit bend" in PP.PARTS
+    assert '1" conduit bend' in PP.PARTS
+    assert PP.lookup("25mm conduit bend")[0] != PP.lookup('1" conduit bend')[0]
+    assert not PP.PARTS["25mm conduit bend"]["aliases"]
+    assert not PP.PARTS['1" conduit bend']["aliases"]
+
+
+def test_the_seeded_rates_are_never_presented_as_real_prices():
+    """
+    The one claim this whole feature must never make. Asserted against the
+    module's own docstring, because that is the text a reader lands on.
+    """
+    doc = (PP.__doc__ or "").upper()
+    assert "ASSUMED PLACEHOLDER" in doc
+    assert "NOT A QUOTED" in doc or "NONE OF IT IS A QUOTED" in doc
+
+
+# ══ 8. The edit form ══════════════════════════════════════════════════════
+
+def test_extra_lines_round_trip_through_the_edit_form(client):
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "130", "")])
+    r = client.get(f"/purchase/edit/{po['id']}")
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert "Measuring tape 5 m" in html, "the stored line must come back into the form"
+    assert 'name="extra_desc"' in html
+
+
+def test_the_edit_form_can_add_and_remove_an_extra_line(client):
+    """
+    Not positional, unlike the item rows: this repeater can gain and lose rows,
+    so `_reprice()` re-reads it whole rather than diffing it.
+    """
+    po = _po(client, rate="1000", qty="10",
+             extras=[("Measuring tape 5 m", "Nos", "4", "130", "")])
+    pid = po["id"]
+    rows = PU._priced_rows(po)
+
+    r = client.post(f"/purchase/edit/{pid}", data={
+        "line_rate": [f"{float(x.get('price') or 0):.2f}" for _i, x in rows],
+        "line_discount": ["" for _ in rows],
+        "extra_desc":     ["Masking tape 1 inch", "Reflective jacket"],
+        "extra_unit":     ["Nos", "Nos"],
+        "extra_qty":      ["3", "2"],
+        "extra_rate":     ["90", "650"],
+        "extra_discount": ["", ""],
+        "charge_label": [], "charge_amount": [],
+    })
+    assert r.status_code == 302
+    po = STORE["purchases"][pid]
+    assert [x["description"] for x in po["extra_lines"]] == \
+        ["Masking tape 1 inch", "Reflective jacket"]
+    assert po["subtotal"] == 10000.0 + 270.0 + 1300.0
+
+
+def test_editing_only_the_extra_lines_is_not_reported_as_nothing_changed(client):
+    """
+    "Nothing changed, so nothing was recorded" would be a lie about a save that
+    happened. It goes on the order's own status trail rather than faking an
+    entry in `reprice_log`, which lists rate movements on item lines.
+    """
+    po = _po(client, rate="1000", qty="10")
+    pid = po["id"]
+    rows = PU._priced_rows(po)
+    before = len(po.get("status_history") or [])
+
+    r = client.post(f"/purchase/edit/{pid}", data={
+        "line_rate": [f"{float(x.get('price') or 0):.2f}" for _i, x in rows],
+        "line_discount": ["" for _ in rows],
+        "extra_desc": ["Masking tape 1 inch"], "extra_unit": ["Nos"],
+        "extra_qty": ["3"], "extra_rate": ["90"], "extra_discount": [""],
+        "charge_label": [], "charge_amount": [],
+    }, follow_redirects=False)
+    assert r.status_code == 302
+
+    po = STORE["purchases"][pid]
+    assert len(po["status_history"]) == before + 1
+    assert not po.get("reprice_log"), \
+        "an extra-line edit is not a rate movement on an item line"
+
+
+# ══ 9. Where the repeater is — every form that raises or reprices an order ═
+
+def test_the_repeater_is_on_create_and_edit(client):
+    po = _po(client)
+    for url in ("/purchase/create", f"/purchase/edit/{po['id']}"):
+        html = client.get(url).get_data(as_text=True)
+        assert 'name="extra_desc"' in html, f"{url} must offer the repeater"
+        assert 'id="xl-parts"' in html, f"{url} must offer the typeahead"
+
+
+def test_the_repeater_is_on_the_two_picker_flows_too(client):
+    """
+    ⚠ **REVERSED 14 September 2026, by the owner's decision.** This test was
+    `test_the_repeater_is_NOT_on_the_two_picker_flows` and pinned a recorded
+    deviation: *"`/purchase/from-boq` and `/purchase/from-draft` are picker
+    flows over a schedule; their job is to carry ticked lines across without
+    re-entry. Bolting a free-text surface onto a picker is a second design —
+    two ways of adding a line on one form, one traceable to the schedule and
+    one not. A part on no schedule is added afterwards on
+    `/purchase/edit/<id>`."* Its assertion was, verbatim:
+
+        assert 'name="extra_desc"' not in html, \\
+            "the picker flow must not grow a free-text line surface"
+
+    The owner raised an order from a draft, found the section missing from the
+    form that goes to the vendor while the reprice form beside it carried it,
+    and rejected the deviation: an order is written once, and sending it out
+    and then reopening it to add the parts is the re-entry the route exists to
+    avoid. `tests/test_po_upstream_repeaters.py` holds the behaviour; this
+    test holds only that the surface is there.
+    """
+    import boq
+    demo_boq_id()
+    boq_id = sorted(STORE["boqs"])[0]
+    html = client.get(f"/purchase/from-boq/{boq_id}").get_data(as_text=True)
+    assert 'name="extra_desc"' in html, \
+        "the picker flow must offer the extra-parts repeater"
+    assert 'id="xl-parts"' in html, "and its typeahead"
+
+
+def test_every_order_this_module_creates_carries_the_key(client):
+    """
+    `extra_lines` is written even when empty, exactly as `charges` is, so code
+    downstream never has to ask which route wrote the record.
+    """
+    import boq
+    demo_boq_id()
+    po = _po(client)
+    assert "extra_lines" in po and po["extra_lines"] == []
+
+
+def test_an_order_written_before_this_pass_reads_as_empty(client):
+    """
+    No backfill. An order with no `extra_lines` key at all reads as `[]` and
+    renders byte-for-byte what it always rendered — the same contract
+    `charges_of()` and `proforma.prior_invoiced` hold to.
+    """
+    po = _po(client)
+    del po["extra_lines"]
+    assert PU.extra_lines_of(po) == []
+    assert PU.extra_lines_total(PU.extra_lines_of(po)) == 0.0
+    assert client.get(f"/purchase/view/{po['id']}").status_code == 200
+
+
+# ══ 10. Job costing — extra-line value gets its own row ═══════════════════
+
+def test_extra_line_value_is_reported_on_a_row_of_its_own(client):
+    """
+    **An extra line is real cost with no BOQ line behind it.**
+
+    Folded silently into `committed` it would be invisible; dropped, it would
+    understate the job. So it is reported as its own figure *as well as* inside
+    `committed` — the honest pair, because it genuinely is part of the
+    commitment and it genuinely answers to nothing on any schedule.
+    """
+    seed_baseline("products")
+    seed_baseline("addresses")
+    import quotation  # noqa: F401
+
+    qid = "jc-quote-0001"
+    STORE["quotations"][qid] = {"id": qid, "ref": "QT-9001",
+                                "grand_total": 100000.0, "line_items": []}
+    pid = sorted(STORE["products"])[0]
+    client.post("/purchase/create", data={
+        "date": "2026-04-18", "vendor_id": demo_address_id("supplier_civil"), "status": "Draft",
+        "quotation_id": qid,
+        "tax_type": "exempt", "cgst_rate": "0", "igst_rate": "0",
+        "line_product_id": pid, "line_qty": "10", "line_rate": "1000",
+        "line_discount": "",
+        "extra_desc": ["Masking tape 1 inch"], "extra_unit": ["Nos"],
+        "extra_qty": ["5"], "extra_rate": ["90"], "extra_discount": [""],
+        "charge_label": [], "charge_amount": [],
+    })
+
+    jc = PU.job_cost(qid)
+    assert jc["committed"] == 10450.0, "the whole commitment"
+    assert jc["extra_committed"] == 450.0, "and how much of it is on no schedule"
+    assert jc["extra_count"] == 1
+    assert jc["extra_committed"] < jc["committed"], \
+        "the breakout is part of committed, not a second total beside it"
+
+
+def test_the_job_costing_chip_says_so_only_when_there_is_something_to_say(client):
+    """
+    Rendered only when there is extra-line value — which is what keeps
+    `/purchase/view`'s pinned bytes still on an order that has none. Same
+    contract as the Reprice button and the upstream chip strip.
+    """
+    seed_baseline("products")
+    seed_baseline("addresses")
+
+    qid = "jc-quote-0002"
+    STORE["quotations"][qid] = {"id": qid, "ref": "QT-9002",
+                                "grand_total": 100000.0, "line_items": []}
+    pid = sorted(STORE["products"])[0]
+
+    def _raise(extras):
+        return client.post("/purchase/create", data={
+            "date": "2026-04-18", "vendor_id": demo_address_id("supplier_civil"), "status": "Draft",
+            "quotation_id": qid,
+            "tax_type": "exempt", "cgst_rate": "0", "igst_rate": "0",
+            "line_product_id": pid, "line_qty": "10", "line_rate": "1000",
+            "line_discount": "",
+            "extra_desc":     [e[0] for e in extras],
+            "extra_unit":     [e[1] for e in extras],
+            "extra_qty":      [e[2] for e in extras],
+            "extra_rate":     [e[3] for e in extras],
+            "extra_discount": ["" for _ in extras],
+            "charge_label": [], "charge_amount": [],
+        })
+
+    _raise([])
+    plain = list(STORE["purchases"].values())[0]
+    html = client.get(f"/purchase/view/{plain['id']}").get_data(as_text=True)
+    assert "job costing" in html
+    assert "extra parts" not in html, \
+        "an order with no extra lines must draw the string it always drew"
+
+    _raise([("Masking tape 1 inch", "Nos", "5", "90")])
+    withx = [p for p in STORE["purchases"].values() if p["extra_lines"]][0]
+    html = client.get(f"/purchase/view/{withx['id']}").get_data(as_text=True)
+    assert "extra parts" in html
+    assert "on no schedule" in html
+
+
+# ══ 11. The control — nothing else moved ══════════════════════════════════
+
+# The golden fixtures live in `test_print_golden.py` and are imported here
+# rather than copied. A fixture is found in the test module's own namespace, so
+# importing the decorated functions is enough to make them usable below —
+# `pinned_identity` comes too because the other three depend on it.
+from test_print_golden import (  # noqa: E402
+    golden, golden_dc, golden_picker, golden_ra, pinned_identity,  # noqa: F401
+    pinned_counts, golden_dpo, golden_merged, golden_ms,  # noqa: F401
+    # (golden_picker depends on every one of them — 14 Sep 2026)
+)
+from conftest import demo_boq_id, seed_baseline, demo_address_id
+
+
+def test_the_other_pinned_documents_did_not_move(client, golden, golden_ra,
+                                                 golden_dc, golden_picker):
+    """
+    **The control for this whole pass.**
+
+    `/purchase/view` moved and was re-baselined, in the `head` block, by exactly
+    the 1,800 characters of `.xl-*` stylesheet. **Nothing else may have.** This
+    re-runs the other pinned digests from `test_print_golden.py` against their
+    own recorded values — the proforma, the tax invoice, the RA bill, the
+    delivery challan and `/po/create` — so that a change to a shared sheet
+    cannot hide behind a purchase order that was expected to move.
+
+    It is deliberately a second assertion of what `test_print_golden.py` already
+    checks. Two files failing says "a shared sheet moved"; one says "the buy
+    side moved", and telling those apart from the failure message is worth the
+    duplication.
+
+    ⚠ **The quotation view page is NOT among them, and that is a fact about the
+      repo rather than an omission here.** `test_print_golden.py` pins the
+      proforma, the tax invoice, the purchase order, the RA bill, the delivery
+      challan and the `/po/create` picker form — six things, and
+      `/quotation/view` is not one of them. There is no `Q_WHOLE` to assert
+      against. `quotation.py` was not edited in this pass, and the sheets it
+      owns are covered transitively by the five documents below that render
+      through them.
+    """
+    from test_print_golden import (
+        GOLD_DC, GOLD_PI, GOLD_PICK_BOQ, GOLD_TI,
+        DC_BLOCKS, DC_LEN, DC_WHOLE,
+        PI_BLOCKS, PI_LEN, PI_WHOLE,
+        PICK_BLOCKS, PICK_LEN, PICK_WHOLE, PICKER_BLOCKS,
+        RA_BLOCKS, RA_LEN, RA_WHOLE,
+        TI_BLOCKS, TI_LEN, TI_WHOLE,
+        _check,
+    )
+
+    for url, whole, length, blocks, markers, what in [
+        (f"/proforma/view/{GOLD_PI}", PI_WHOLE, PI_LEN, PI_BLOCKS,
+         None, "proforma"),
+        (f"/invoice/view/{GOLD_TI}", TI_WHOLE, TI_LEN, TI_BLOCKS,
+         None, "tax invoice"),
+        ("/ra/print/gold-ra", RA_WHOLE, RA_LEN, RA_BLOCKS, None, "RA bill"),
+        (f"/dc/print/{GOLD_DC}", DC_WHOLE, DC_LEN, DC_BLOCKS,
+         None, "delivery challan"),
+        (f"/po/create?boq={GOLD_PICK_BOQ}", PICK_WHOLE, PICK_LEN, PICK_BLOCKS,
+         PICKER_BLOCKS, "/po/create picker form"),
+    ]:
+        r = client.get(url)
+        assert r.status_code == 200, f"{what} did not render"
+        kw = {"markers": markers} if markers is not None else {}
+        _check(r.get_data(as_text=True), whole, length, blocks, what=what, **kw)
+
+
+# ══ 8. The server is the mechanism, and the JavaScript is not ═════════════
+#
+# ⚠ **The pass that built this feature could not run a line of its own
+#   JavaScript, and neither can this file.** There is no JS test harness in this
+#   repo and adding one was not authorised. `xlFill()`, `addExtra()` and
+#   `recalc()` were asserted only as *strings present in the response* — which
+#   proves they were rendered and proves nothing about whether they work.
+#
+#   Worse, the page carried `xlNorm()`, a JavaScript reimplementation of
+#   `po_parts._norm()`, with **nothing checking that the two agreed**. The day
+#   they diverged, the box would prefill a rate the server then declined to mark
+#   as a placeholder, and an invented price would reach a vendor with no chip on
+#   it — the exact failure the chip exists to prevent.
+#
+#   The fix was not a test for the divergence. It was to **remove the
+#   possibility of one**: the server fills a blank rate on POST from
+#   `po_parts.py`, and the browser gets a finished lookup table it resolves
+#   nothing with. Every test below runs with **no JavaScript executed at all**,
+#   which is both the honest test condition and the condition the repo is in.
+
+
+def test_the_server_fills_a_blank_rate_for_a_seeded_part(client):
+    """
+    **The load-bearing test of the inversion.** A seeded description with an
+    empty rate box, posted with no JavaScript anywhere near it, comes back
+    priced from `po_parts.py` — and flagged, because the figure is the
+    placeholder.
+    """
+    _canon, unit, seeded = PP.lookup("Measuring tape 5 m")
+    po = _po(client, extras=[("Measuring tape 5 m", "", "4", "", "")])
+    row = po["extra_lines"][0]
+
+    assert row["rate"] == seeded, "the server must fill the rate, not the browser"
+    assert row["unit"] == unit, "and the unit with it"
+    assert row["total"] == round(seeded * 4, 2)
+    assert row["rate_is_assumed"] is True
+
+    # It is inside `subtotal`, exactly as a typed rate would be.
+    assert po["subtotal"] == round(10 * 1000 + seeded * 4, 2)
+
+
+def test_an_alias_fills_the_same_rate_as_its_canonical_name_on_POST(client):
+    """
+    Server-side, through the form, with a blank rate box. Until 29 August 2026
+    the map handed to the browser held **canonical names only**, so not one of
+    the client's own spellings ever prefilled anything.
+    """
+    _c, canon_unit, seeded = PP.lookup("Bullet fastener 8mm")
+    po = _po(client, extras=[("Bullet Fastner 8mm", "", "10", "", "")])
+    row = po["extra_lines"][0]
+
+    assert row["rate"] == seeded
+    assert row["unit"] == canon_unit
+    assert row["rate_is_assumed"] is True
+    assert row["description"] == "Bullet Fastner 8mm", \
+        "what was typed is what is stored — the alias resolves the RATE, not the text"
+
+
+def test_a_description_matching_nothing_is_stored_as_typed_with_a_blank_rate(client):
+    """
+    The list narrows nothing. A part on no seed row is accepted exactly as
+    typed, keeps its blank rate, and carries no flag — there is no figure to
+    call a placeholder.
+    """
+    po = _po(client, extras=[("Entirely bespoke bracket", "Nos", "2", "", "")])
+    row = po["extra_lines"][0]
+
+    assert row["description"] == "Entirely bespoke bracket"
+    assert row["rate"] == 0.0
+    assert row["total"] == 0.0
+    assert row["rate_is_assumed"] is False
+
+
+def test_a_rate_different_from_the_seed_is_stored_verbatim_and_not_flagged(client):
+    """
+    A real quoted price. The server must not touch it and must not call it a
+    placeholder — the box was not blank, so nothing is filled.
+    """
+    _c, _u, seeded = PP.lookup("Measuring tape 5 m")
+    typed = seeded + 25.0
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", str(typed), "")])
+    row = po["extra_lines"][0]
+
+    assert row["rate"] == typed, "a typed rate is never overwritten"
+    assert row["rate_is_assumed"] is False
+
+
+def test_a_rate_equal_to_the_seed_typed_by_hand_is_NOT_flagged(client):
+    """
+    ⚠ **The marker is a claim about the FILL, not about the figure** — the
+    14 September 2026 ruling, inverted from what this test asserted before.
+
+    Type `Measuring tape 5 m` and its seeded rate by hand, with the server filling
+    nothing, and the line is a priced line: "if I have entered price it is not
+    a placeholder." The old test held the opposite on purpose, as the safe
+    direction; the owner ruled it a false statement about a price he chose.
+    """
+    _c, _u, seeded = PP.lookup("Measuring tape 5 m")
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", str(seeded), "")])
+    assert po["extra_lines"][0]["rate"] == seeded
+    assert po["extra_lines"][0]["rate_is_assumed"] is False
+
+
+def test_an_explicit_zero_rate_is_a_typed_rate_and_is_not_filled(client):
+    """
+    `0` is a figure somebody chose; an empty box is not. Only the empty box is
+    filled, which is the same "suggest, never impose" contract `fillRate()`
+    holds one repeater along.
+    """
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "0", "")])
+    row = po["extra_lines"][0]
+    assert row["rate"] == 0.0, "an explicit zero must survive the prefill"
+    assert row["rate_is_assumed"] is False
+
+
+def test_a_typed_unit_is_never_overwritten_by_the_seeded_one(client):
+    po = _po(client, extras=[("Measuring tape 5 m", "Cylinder", "4", "", "")])
+    row = po["extra_lines"][0]
+    assert row["unit"] == "Cylinder"
+    assert row["rate"] == PP.lookup("Measuring tape 5 m")[2], \
+        "the rate still fills; only the unit was already given"
+
+
+# ══ 9. The lookup map handed to the browser ═══════════════════════════════
+
+def test_the_prefill_map_is_the_server_index_and_nothing_else():
+    """
+    Same keys as `po_parts.INDEX` — the set `PP.lookup()` matches on. Built
+    from it rather than beside it, so "what the browser thinks matches" and
+    "what the server matches" cannot become two different questions.
+    """
+    m = PP.prefill_map()
+    assert set(m) == set(PP.INDEX), \
+        "the browser's key set must BE the server's key set"
+    for key, canonical in PP.INDEX.items():
+        assert m[key]["r"] == float(PP.PARTS[canonical]["assumed_rate"])
+        assert m[key]["u"] == PP.PARTS[canonical]["unit"]
+
+
+def test_the_prefill_map_contains_no_un_normalised_keys():
+    """
+    Every key is already through `_norm()`. The browser is handed a finished
+    table, never the rules for building one.
+    """
+    for key in PP.prefill_map():
+        assert key == PP._norm(key), f"{key!r} reaches the page un-normalised"
+
+
+def test_the_prefill_map_resolves_aliases_before_it_reaches_the_page():
+    """
+    The alias keys must be IN the map. Until 29 August 2026 it was built from
+    `PARTS` alone — canonical names only, no aliases — so every one of the
+    client's own spellings missed in the browser.
+    """
+    m = PP.prefill_map()
+    for alias, canonical in [("modular soket 16a", "Modular socket 16A"),
+                             ("bullet fastner 8mm", "Bullet fastener 8mm"),
+                             ("lather hand gloves", "Leather hand gloves"),
+                             ("cutting disc", "Cutting disc 4 inch")]:
+        assert alias in m, f"{alias!r} must be a key the browser can hit"
+        assert m[alias]["r"] == float(PP.PARTS[canonical]["assumed_rate"])
+
+
+@pytest.mark.parametrize("page", ["create", "edit"])
+def test_the_page_carries_no_JS_normalisation_function(client, page):
+    """
+    ⚠ **`xlNorm()` is gone and must not come back.**
+
+    It was a second implementation of `po_parts._norm()`, in another language,
+    that nothing could check. One source of truth means the page holds a
+    finished table and no rules — so there is no normalisation *function* on it
+    to drift from the Python one.
+    """
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "", "")])
+    path = "/purchase/create" if page == "create" else f"/purchase/edit/{po['id']}"
+    html = client.get(path).get_data(as_text=True)
+
+    assert "xlNorm" not in html, \
+        "the page must carry no JavaScript reimplementation of _norm()"
+    assert "XSEED" in html, "the rendered lookup table must still be there"
+    assert "function xlFill" in html
+
+
+@pytest.mark.parametrize("page", ["create", "edit"])
+def test_the_rendered_map_on_the_page_is_normalised_and_alias_resolved(client, page):
+    """
+    Asserted against the bytes actually served, not against `prefill_map()` —
+    the map is rendered through `json_for_script()` and it is the rendered form
+    the browser reads.
+    """
+    import json
+
+    po = _po(client, extras=[("Measuring tape 5 m", "Nos", "4", "", "")])
+    path = "/purchase/create" if page == "create" else f"/purchase/edit/{po['id']}"
+    html = client.get(path).get_data(as_text=True)
+
+    raw = html.split("var XSEED = ", 1)[1].split(";", 1)[0]
+    served = json.loads(raw)
+
+    assert set(served) == set(PP.INDEX), "the served map must be the whole index"
+    for key in served:
+        assert key == PP._norm(key), f"{key!r} was served un-normalised"
+    assert "modular soket 16a" in served, "aliases must reach the browser resolved"
+
+
+# ══ 11. The quotation deal panel — ONE definition of "committed" ═══════════
+#
+# ⚠ **The panel used to re-derive its own `committed` from a STORE walk beside
+#   `purchase.job_cost()`.** Two functions computing the same commercial word is
+#   the defect; the missing extra-parts row was its most visible symptom, and
+#   ABOUT.md recorded the whole thing as a known gap because `quotation.py` was
+#   frozen against feature work. It was unfrozen NARROWLY for this one figure
+#   under the second 29 August 2026 override block, and this section is what
+#   holds the two together now that they are one.
+#
+#   The two agreed when they were separated — measured across the live database
+#   and an exhaustive sweep of every PO status before a line was changed, on the
+#   rule that a Committed figure which moves is a commercial call and not an
+#   engineering one. These tests are what keep them agreeing.
+
+def _quote_with_po(client, qid, ref, *, extras=(), status="Draft", quoted=100000.0):
+    """A quotation with one PO raised against it, through the real routes."""
+    seed_baseline("products")
+    seed_baseline("addresses")
+
+    STORE["quotations"].setdefault(qid, {
+        "id": qid, "ref": ref, "date": "2026-04-10",
+        "account_name": "Example Developers Pvt Ltd",
+        "to": "Example Developers Pvt Ltd\nBangalore, Karnataka - 560066",
+        "ship_same": "on", "line_items": [],
+        "subtotal": quoted, "tax_type": "exempt", "tax_info": {"total": 0.0},
+        "grand_total": quoted, "total_qty": 0.0,
+    })
+    pid = sorted(STORE["products"])[0]
+    r = client.post("/purchase/create", data={
+        "date": "2026-04-18", "vendor_id": demo_address_id("supplier_civil"), "status": status,
+        "quotation_id": qid,
+        "tax_type": "exempt", "cgst_rate": "0", "igst_rate": "0",
+        "line_product_id": pid, "line_qty": "10", "line_rate": "1000",
+        "line_discount": "",
+        "extra_desc":     [str(e[0]) for e in extras],
+        "extra_unit":     [str(e[1]) for e in extras],
+        "extra_qty":      [str(e[2]) for e in extras],
+        "extra_rate":     [str(e[3]) for e in extras],
+        "extra_discount": [str(e[4]) for e in extras],
+        "charge_label": [], "charge_amount": [],
+    })
+    assert r.status_code == 302, "the order was not created"
+    return client.get(f"/quotation/view/{qid}").get_data(as_text=True)
+
+
+def test_the_deal_panel_renders_job_costs_committed_figure(client):
+    """
+    **The panel's Committed IS `job_cost()`'s Committed.** Asserted against the
+    served bytes, so a second derivation reappearing in `quotation.py` fails
+    here rather than being noticed by a client reading two different totals for
+    one word.
+    """
+    qid = "dp-quote-0001"
+    html = _quote_with_po(client, qid, "QT-9101",
+                          extras=[("Masking tape 1 inch", "Nos", "5", "90", "")])
+
+    jc = PU.job_cost(qid)
+    assert jc["committed"] == 10450.0
+    assert f'&#8377;&nbsp;{jc["committed"]:,.0f}' in html, \
+        "the panel must render job_cost()'s committed figure, not one of its own"
+    assert f'&#8377;&nbsp;{jc["quoted"]:,.0f}' in html
+    assert f'&#8377;&nbsp;{jc["margin"]:,.0f}' in html
+
+
+def test_the_deal_panel_breaks_out_extra_line_value_on_its_own_row(client):
+    """
+    The row the folded figure hid. It is **part of** committed and reported
+    separately, because it is the part of it that no schedule line accounts for.
+    """
+    qid = "dp-quote-0002"
+    html = _quote_with_po(client, qid, "QT-9102",
+                          extras=[("Masking tape 1 inch", "Nos", "5", "90", ""),
+                                  ("Measuring tape 5 m", "Nos", "2", "130", "")])
+
+    jc = PU.job_cost(qid)
+    assert jc["extra_committed"] == 710.0
+    assert jc["extra_count"] == 2
+
+    assert "Of which, extra parts" in html, "the breakout row must be drawn"
+    assert f'&#8377;&nbsp;{jc["extra_committed"]:,.0f}' in html
+    assert "2 line(s) on no schedule" in html
+    # It is inside committed, not a second total beside it.
+    assert jc["extra_committed"] < jc["committed"]
+
+
+def test_the_deal_panel_draws_no_breakout_row_when_there_are_no_extra_lines(client):
+    """
+    Same contract `/purchase/view` holds for the same clause: drawn only when
+    there is something to say. A zero row would be noise on every deal.
+    """
+    qid = "dp-quote-0003"
+    html = _quote_with_po(client, qid, "QT-9103")
+
+    assert PU.job_cost(qid)["extra_committed"] == 0.0
+    assert "Of which, extra parts" not in html
+    assert "Job costing" in html, "the panel itself must still be there"
+
+
+def test_the_deal_panel_excludes_cancelled_orders_exactly_as_job_cost_does(client):
+    """
+    A withdrawn commitment is not a cost — but the order is still **counted**,
+    so the panel never silently loses a document somebody raised. Both halves
+    come from `job_cost()` now, so they cannot disagree with it.
+    """
+    qid = "dp-quote-0004"
+    _quote_with_po(client, qid, "QT-9104",
+                   extras=[("Masking tape 1 inch", "Nos", "5", "90", "")])
+    html = _quote_with_po(client, qid, "QT-9104", status="Cancelled",
+                          extras=[("Measuring tape 5 m", "Nos", "2", "130", "")])
+
+    jc = PU.job_cost(qid)
+    assert jc["count"] == 2, "both orders are counted"
+    assert jc["committed"] == 10450.0, "only the live one is spent"
+    assert f'&#8377;&nbsp;{jc["committed"]:,.0f}' in html
+    assert "2 purchase order(s)" in html, \
+        "the cancelled order is still shown as raised"
+
+
+def test_quotation_does_not_import_purchase_at_module_level():
+    """
+    ⚠ **The arrow must not join the module graph.** `purchase.py` imports
+    `quotation.py` for the document formatters, so a module-level import back is
+    a cycle. `view_quotation()` takes it in the function body — the same escape
+    hatch `dashboard._shell()` uses — and `test_import_directions.py` pins the
+    pair at scope "module". This is the second assertion of it, from the side
+    that would break.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(PU.__file__).parent / "quotation.py"
+    tree = ast.parse(src.read_text(encoding="utf8"))
+    top = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            top.add(node.module.split(".")[0])
+
+    assert "purchase" not in top, \
+        "quotation.py must not import purchase.py at module level — it is a cycle"

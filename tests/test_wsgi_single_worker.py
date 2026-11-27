@@ -1,0 +1,461 @@
+"""
+tests/test_wsgi_single_worker.py — the guard that stops a silent disaster
+=========================================================================
+
+`wsgi.py` refuses to run under more than one process, because `store.STORE` is
+one dict in one process's RAM and `db.sync()` writes the whole of it back after
+every request. Two workers is two divergent copies of the entire application
+state overwriting each other **with no error at all** — see `wsgi.py`'s header
+for the worked sequence.
+
+A guard against a silent failure has to be tested harder than one against a
+crash, because there is nothing to notice if it stops working.
+
+⚠ **THIS FILE IMPORTS `wsgi` IN A SUBPROCESS, NEVER IN THE TEST PROCESS.**
+  Importing it here would take the single-worker lock for the whole pytest run
+  and wrap `app.wsgi_app` for every other test file in the session. Both guards
+  are therefore exercised the way a deployment meets them: guard 1 by starting
+  real processes, guard 2 through its pure function with the pid faked, because
+  Windows has no `fork()` and the condition cannot be produced natively here.
+"""
+
+import os
+import pathlib
+import subprocess
+import sys
+import textwrap
+
+import pytest
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+# ⚠ **THE CHILD PROCESSES READ `.env` FOR THEMSELVES, and `conftest.py` cannot
+#   stop them** — 25 September 2026, CLIENT_CHANGES.md §0, the thirty-first
+#   block. `conftest._never_read_dotenv()` replaces the loader in the **test**
+#   process; a `python -c "import wsgi"` child imports `db.py` fresh, calls
+#   `load_dotenv()` for real, and picks up whatever `.env` sits in the checkout.
+#
+#   Measured: with a production-shaped `.env` present,
+#   `test_the_first_process_gets_through_and_reports_what_it_found` failed on
+#   `SESSION_COOKIE_SECURE is FALSE` missing from the banner — because with
+#   `Secure=true` in `.env` the install is, correctly, no longer a default one.
+#
+#   So the child is given the local-dev values as **real environment
+#   variables**, which `load_dotenv(override=False)` cannot overwrite. That is
+#   the same mechanism `DB_ENABLED` and `SECRET_KEY` have always used two lines
+#   below, extended to the flags this file asserts on. It makes the child a
+#   **default install**, which is exactly the condition these tests are about.
+_LOCAL_DEV_ENV = {
+    # No MySQL: the guard is about processes, not about the database, and a test
+    # that needed a live server would be skipped on the machine that matters.
+    "DB_ENABLED": "false",
+    "SECRET_KEY": "test-secret",
+    # The session-cookie defaults, so the banner reports a default install
+    # whatever the checkout's `.env` says.
+    "SESSION_COOKIE_SECURE": "false",
+    "SESSION_COOKIE_HTTPONLY": "true",
+    "SESSION_COOKIE_SAMESITE": "Lax",
+    # `DB_STRICT` is left alone deliberately: `DB_ENABLED=false` already makes
+    # the banner report it, and pinning it here would hide a change to that.
+    # Demo seeding off — the child renders no page, and a boot that seeds 84
+    # records is slower for nothing.
+    "QMS_DEMO_DATA": "false",
+}
+
+
+def _run(code: str, env_extra=None, timeout=120):
+    """Run `code` in a subprocess with DB persistence OFF. Returns CompletedProcess."""
+    env = dict(os.environ)
+    env.update(_LOCAL_DEV_ENV)
+    env.pop("QMS_ALLOW_MULTIPROCESS", None)
+    env.update(env_extra or {})
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code)],
+        cwd=str(REPO), env=env, capture_output=True, text=True,
+        timeout=timeout, encoding="utf-8", errors="replace")
+
+
+def _lock_for(tmp_path) -> str:
+    return str(tmp_path / "worker.lock")
+
+
+def _hold_the_lock(lock: str, env_extra=None):
+    """
+    A subprocess that takes the lock and keeps it, returned once it really has it.
+
+    ⚠ **Read until the marker, never just the first line.** `db.init()` prints
+    its own banner to stdout before anything here runs, so
+    `stdout.readline()` returns *that* — which made four tests fail on the
+    holder's startup noise rather than on the thing under test.
+    """
+    env = {**os.environ, **_LOCAL_DEV_ENV, "QMS_LOCK_FILE": lock}
+    env.pop("QMS_ALLOW_MULTIPROCESS", None)
+    env.update(env_extra or {})
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import wsgi, time; print('HOLDING', flush=True); time.sleep(60)"],
+        cwd=str(REPO), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace")
+    for _ in range(60):
+        line = proc.stdout.readline()
+        if not line:
+            break
+        if "HOLDING" in line:
+            return proc
+    proc.kill()
+    proc.wait(timeout=30)
+    raise AssertionError("the lock holder never reported HOLDING")
+
+
+# ── 1. The module is importable and the entry point has the expected name ──
+
+def test_gunicorn_can_find_the_application_callable(tmp_path):
+    """
+    `gunicorn ... wsgi:application` resolves that attribute by name. A rename
+    would make the documented production command fail with nothing but
+    `AppImportError`, so the name is pinned.
+    """
+    r = _run("""
+        import wsgi
+        print("CALLABLE", callable(wsgi.application))
+        print("NAME", type(wsgi.application).__name__)
+    """, {"QMS_LOCK_FILE": _lock_for(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    assert "CALLABLE True" in r.stdout
+    assert "NAME Flask" in r.stdout
+
+
+def test_the_first_process_gets_through_and_reports_what_it_found(tmp_path):
+    """The success path, and it has to stay noisy: the startup banner is how the
+    operator tells a configured install from a default one."""
+    r = _run("""
+        import wsgi
+        print("STARTED")
+    """, {"QMS_LOCK_FILE": _lock_for(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    assert "STARTED" in r.stdout
+    assert "production entry point" in r.stderr
+    assert "single worker  : OK" in r.stderr
+    # The four things that are wrong on a default install are named, not implied.
+    assert "SESSION_COOKIE_SECURE is FALSE" in r.stderr
+    assert "DB_STRICT" in r.stderr
+
+
+# ── 2. Guard 1: a second process is REFUSED ────────────────────────────────
+
+def test_a_second_process_on_the_same_lock_is_refused(tmp_path):
+    """
+    ⚠ **The headline.** Two processes, one lock, and the second must not run.
+
+    The first process is held alive while the second tries, because a lock
+    released by the kernel on exit would otherwise make this test pass by
+    accident — which is exactly the vacuous version of it.
+    """
+    lock = _lock_for(tmp_path)
+    # Wait for the holder to actually have the lock, rather than sleeping and
+    # hoping — a timing-dependent guard test is worse than none.
+    holder = _hold_the_lock(lock)
+    try:
+        second = _run("""
+            import wsgi
+            print("SECOND GOT THROUGH")
+        """, {"QMS_LOCK_FILE": lock})
+
+        assert second.returncode != 0, (
+            "a SECOND process imported wsgi.py successfully while the first held "
+            "the lock. Two workers means two divergent copies of STORE "
+            "overwriting each other silently.")
+        assert "SECOND GOT THROUGH" not in second.stdout
+        assert "CANNOT RUN MORE THAN ONE WORKER" in second.stderr
+        assert "refusing to run multi-process" in (second.stderr + second.stdout)
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+
+def test_the_refusal_tells_the_operator_what_to_run_instead(tmp_path):
+    """
+    A refusal that does not say what to do instead gets worked around, usually by
+    deleting the thing that refused. INTRODUCTION.md §2: an error that says only
+    "invalid" costs somebody an afternoon.
+    """
+    lock = _lock_for(tmp_path)
+    holder = _hold_the_lock(lock)
+    try:
+        second = _run("import wsgi", {"QMS_LOCK_FILE": lock})
+        text = second.stderr
+        assert "--workers 1" in text, "the refusal does not name the right command"
+        assert "threads" in text.lower(), "it does not offer the way to scale"
+        assert "QMS_ALLOW_MULTIPROCESS" in text, "it hides its own override"
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+
+def test_the_lock_is_released_when_the_process_dies(tmp_path):
+    """
+    An OS advisory lock rather than a pidfile, and this is the difference.
+
+    A crashed worker must not leave a file that stops the next start — that turns
+    a guard into an outage, and the first thing anybody does about an outage is
+    remove the guard.
+    """
+    lock = _lock_for(tmp_path)
+    first = _run("import wsgi; print('ONE')", {"QMS_LOCK_FILE": lock})
+    assert first.returncode == 0, first.stderr
+    second = _run("import wsgi; print('TWO')", {"QMS_LOCK_FILE": lock})
+    assert second.returncode == 0, (
+        "the lock outlived the process that held it, so a restart after a crash "
+        f"would be refused forever. stderr: {second.stderr}")
+    assert "TWO" in second.stdout
+
+
+def test_two_different_databases_do_not_fight_over_one_lock(tmp_path):
+    """
+    The lock is keyed by host/port/schema, so staging and production on one box
+    each get their own. Without this, the second deployment reports the first as
+    a rogue worker and neither starts.
+    """
+    # No QMS_LOCK_FILE: the point is the DEFAULT path, which is keyed by
+    # host/port/schema — this is also the one test that proves the boot path
+    # really goes through `lock_path()`. TMPDIR/TEMP/TMP move
+    # tempfile.gettempdir() into tmp_path so the locks it DOES take are there.
+    #
+    # ⚠ **`TMP` was added 27 September 2026 and it matters on Windows only.**
+    #   `tempfile.gettempdir()` reads TMPDIR first on POSIX but **TMP** first on
+    #   Windows, so without it this pair of locks was taken in the real system
+    #   temp directory. It could never collide with a live server's — that one
+    #   is keyed by the real schema and these two are `schema_one` /
+    #   `schema_two` — but "cannot collide" is a fact about today's DB_NAME, and
+    #   the rest of this file now keeps every acquire inside tmp_path.
+    _tmp = {"TMPDIR": str(tmp_path), "TEMP": str(tmp_path), "TMP": str(tmp_path)}
+    holder = _hold_the_lock("", {"DB_NAME": "schema_one", **_tmp})
+    try:
+        other = _run("import wsgi; print('OTHER SCHEMA OK')",
+                     {"DB_NAME": "schema_two", **_tmp})
+        assert other.returncode == 0, other.stderr
+        assert "OTHER SCHEMA OK" in other.stdout
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+
+def test_the_lock_path_is_outside_the_checkout_by_default(tmp_path):
+    """
+    A read-only deployment directory is normal, and a lock file that cannot be
+    created must not be a boot failure on a correct single-worker install.
+
+    ⚠ **THIS TEST MUST NEVER ACQUIRE THE DEFAULT LOCK, AND UNTIL 27 SEPTEMBER
+      2026 IT DID.** It ran `import wsgi` with no `QMS_LOCK_FILE`, so the
+      child took the real default lock at import — and on the production box a
+      live gunicorn is already holding it. The child was refused, exited
+      non-zero, and the test failed on the refusal working correctly rather
+      than on the path it is about. That made `python -m pytest` unusable on
+      the one machine where running it after a deploy matters most, which is
+      the same failure `conftest._never_read_dotenv()` was written for two days
+      earlier. Worse when nothing held it: the import **truncates the lock file
+      and writes its own pid**, so a passing run left the server's lock file
+      naming a process that had already exited.
+
+      So guard 1 is switched off for this child with
+      `QMS_ALLOW_MULTIPROCESS`, which makes the import take **no lock at
+      all** (`wsgi.py`'s guard-1 block does not even call `lock_path()` when it
+      is set), and the **default** path is then asked for directly.
+      `QMS_LOCK_FILE` is passed as `""` rather than left unset so an
+      ambient value in the developer's environment cannot silently turn this
+      into a test of the override.
+
+      **The computed path is still the thing under test**, so moving the
+      default inside the checkout still fails this. The separate question — that
+      the boot path really uses `lock_path()` and not something else — is held
+      by `test_two_different_databases_do_not_fight_over_one_lock`, which boots
+      with no override; and that a path of this shape can really be locked is
+      the companion test below.
+    """
+    # `__file__` does not exist under `python -c`; cwd IS the repo (see _run).
+    r = _run("""
+        import pathlib, wsgi
+        p = wsgi.lock_path()
+        print("LOCK", p)
+        print("INSIDE_REPO", str(p).startswith(str(pathlib.Path.cwd().resolve())))
+    """, {"QMS_LOCK_FILE": "", "QMS_ALLOW_MULTIPROCESS": "1"})
+    assert r.returncode == 0, r.stderr
+    assert "INSIDE_REPO False" in r.stdout
+    assert "qms-" in r.stdout
+    assert "guard is OFF" in r.stderr, (
+        "guard 1 ran, so this child took a lock — on the production box that "
+        "is the live server's lock")
+
+
+def test_a_lock_of_that_shape_can_actually_be_taken(tmp_path):
+    """
+    The control for the test above, and the reason it is not half a test.
+
+    Checking a path without ever locking one would pass just as well if
+    `_take_exclusive_lock()` were broken. The acquire is done here instead —
+    against a file in `tmp_path` carrying the same name the default computes,
+    so that nothing in this file ever touches the lock a live server holds.
+    """
+    r = _run("""
+        import pathlib, os, wsgi
+        default = wsgi.lock_path()
+        mine = pathlib.Path(os.environ["SAFE_DIR"]) / default.name
+        handle, why = wsgi._take_exclusive_lock(mine)
+        print("SAME_NAME", mine.name == default.name)
+        print("TOOK", handle is not None, why)
+        print("NOT_THE_DEFAULT", mine.resolve() != default.resolve())
+        # Read back through the OWNING handle. `msvcrt.locking` is mandatory on
+        # Windows, so a second open of a locked byte is PermissionError even
+        # from the process holding it.
+        handle.seek(0)
+        print("PID_WRITTEN", handle.read(64).strip() == str(os.getpid()))
+    """, {"QMS_LOCK_FILE": "", "QMS_ALLOW_MULTIPROCESS": "1",
+          "SAFE_DIR": str(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    assert "SAME_NAME True" in r.stdout
+    assert "TOOK True" in r.stdout, r.stdout
+    assert "PID_WRITTEN True" in r.stdout
+    assert "NOT_THE_DEFAULT True" in r.stdout
+
+
+# ── 3. Guard 2: the fork case, which guard 1 cannot see ───────────────────
+
+def test_a_forked_worker_is_refused_even_though_it_inherited_the_lock(tmp_path):
+    """
+    ⚠ **The hole guard 1 leaves, exactly the size of `gunicorn --preload`.**
+
+    With `--preload` the module is imported once in the arbiter and the workers
+    are forked. On POSIX an `flock` lives on the open file description and is
+    *inherited*, so guard 1 sees nothing wrong and every child runs. The pid
+    check is what catches it.
+
+    Windows has no `fork()`, so the condition is produced by faking the recorded
+    pid — which tests the decision rather than the platform, and the decision is
+    the part that can be broken by an edit.
+    """
+    r = _run("""
+        import wsgi
+        # Pretend this process is a fork: the pid that imported the module was
+        # somebody else. This is what a --preload child looks like.
+        wsgi._PID_AT_IMPORT = -1
+
+        status = {}
+        def start_response(code, headers):
+            status["code"] = code
+            status["headers"] = dict(headers)
+
+        body = b"".join(wsgi._single_process_wsgi(
+            {"REQUEST_METHOD": "GET", "PATH_INFO": "/", "SERVER_NAME": "x",
+             "SERVER_PORT": "80", "wsgi.url_scheme": "http", "QUERY_STRING": ""},
+            start_response))
+        print("STATUS", status["code"])
+        print("BODY", body.decode())
+    """, {"QMS_LOCK_FILE": _lock_for(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    assert "STATUS 503 Service Unavailable" in r.stdout, (
+        "a forked worker served the request. With gunicorn --preload that is two "
+        "workers writing over each other with no error at all.")
+    assert "more than one worker" in r.stdout
+    assert "CANNOT RUN MORE THAN ONE WORKER" in r.stderr, (
+        "the 503 was returned but nothing reached the log")
+
+
+def test_the_owning_process_is_NOT_refused(tmp_path):
+    """
+    The other half of the control, and the reason the test above is evidence
+    rather than a tautology. A guard that refused every request would pass the
+    assertion above while breaking the application completely — so the same
+    wrapper, in the process that really owns the lock, must serve normally.
+    """
+    r = _run("""
+        import wsgi
+        status = {}
+        def start_response(code, headers):
+            status["code"] = code
+            return lambda b: None
+        body = b"".join(wsgi._single_process_wsgi(
+            {"REQUEST_METHOD": "GET", "PATH_INFO": "/", "SERVER_NAME": "x",
+             "SERVER_PORT": "80", "wsgi.url_scheme": "http", "QUERY_STRING": ""},
+            start_response))
+        print("STATUS", status["code"])
+        print("IS503", "503" in status["code"])
+    """, {"QMS_LOCK_FILE": _lock_for(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    assert "IS503 False" in r.stdout, (
+        "the owning process was refused its own request — the guard is refusing "
+        "everybody, which would pass the fork test for the wrong reason")
+
+
+# ── 4. The override is loud, and it is the only way through ───────────────
+
+def test_the_override_lets_a_second_process_run_but_says_so_every_time(tmp_path):
+    """
+    The escape hatch exists so the refusal can be tested and so an operator who
+    has genuinely made STORE shared is not stuck. It must never be quiet: a
+    silent override is the same failure as no guard, one environment variable
+    later.
+    """
+    lock = _lock_for(tmp_path)
+    holder = _hold_the_lock(lock)
+    try:
+        second = _run("import wsgi; print('THROUGH')",
+                      {"QMS_LOCK_FILE": lock,
+                       "QMS_ALLOW_MULTIPROCESS": "1"})
+        assert second.returncode == 0, second.stderr
+        assert "THROUGH" in second.stdout
+        assert "the single-worker guard is OFF" in second.stderr.lower() or \
+               "guard is OFF" in second.stderr
+        assert "corrupted" in second.stderr
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+
+# ── 5. It must not have changed the app the suite drives ──────────────────
+
+def test_importing_app_does_not_take_a_lock_or_wrap_anything():
+    """
+    ⚠ **The constraint, asserted.** The guard must not break the dev flow or the
+    suite, and both import `app`, not `wsgi`.
+
+    `python app.py` runs the stat reloader, which is deliberately *two*
+    processes; a lock in `app.py` would make the documented dev command fail
+    every time. And a guard disabled for tests is a guard that is off wherever
+    the code is exercised.
+    """
+    r = _run("""
+        import app
+        print("WSGI_APP", app.app.wsgi_app.__class__.__name__)
+        import sys
+        print("WSGI_IMPORTED", "wsgi" in sys.modules)
+    """)
+    assert r.returncode == 0, r.stderr
+    assert "WSGI_IMPORTED False" in r.stdout, (
+        "importing app pulled in wsgi.py, so the suite and the dev reloader are "
+        "now subject to the single-worker lock")
+    assert "_single_process_wsgi" not in r.stdout
+
+
+def test_wsgi_adds_no_route_and_no_permission():
+    """
+    `auth.ROUTE_PERMISSIONS` is default-deny and `tests/test_access_control.py`
+    fails on an unclassified endpoint. `wsgi.py` must stay a pure entry point —
+    if it ever registers a route, that test is where it has to be declared.
+    """
+    r = _run("""
+        import auth
+        before = set(auth.ROUTE_PERMISSIONS)
+        import wsgi
+        after = set(auth.ROUTE_PERMISSIONS)
+        print("NEW", sorted(after - before))
+        print("RULES", sorted(
+            r.endpoint for r in wsgi.application.url_map.iter_rules()
+            if r.endpoint not in auth.ROUTE_PERMISSIONS))
+    """, {"QMS_LOCK_FILE": "", "QMS_ALLOW_MULTIPROCESS": "1"})
+    assert r.returncode == 0, r.stderr
+    assert "NEW []" in r.stdout
+    assert "RULES []" in r.stdout

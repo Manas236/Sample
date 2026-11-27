@@ -1,0 +1,326 @@
+"""
+Every page in this app is the same page.
+
+`chrome.BASE_STYLES` and `chrome._nav()` are what make that true (they lived in
+`dashboard.py` until 14 September 2026), and nothing enforced it — a module could render its own `<style>` block, its own
+header and its own layout, look plausible on its own, and be visibly a
+different application the moment somebody clicked through to it. Two of them
+did: `/client/` and `/po/` shipped with a hand-rolled `.page-container` /
+`.page-head` / `.client-header` layout, none of which exists anywhere else in
+this repo, and `/po/print` loaded `QUOTATION_STYLES` without `VIEW_DOC_STYLES`
+so the document it was printing had no sheet under it at all.
+
+This file is the sweep that would have caught both. It walks **`app.url_map`**
+rather than a hand-written list, so a module added later is checked the day it
+is registered rather than the day somebody notices.
+
+What it deliberately does not check: that two pages look *identical*. Modules
+layer their own stylesheet after `BASE_STYLES` and should — `RA_STYLES`,
+`PURCHASE_STYLES` and `BOQ_STYLES` all do. The property is that they layer
+**after the shared one**, not instead of it.
+"""
+
+import pytest
+
+from store import STORE
+from conftest import seed_baseline
+
+# ⚠ The product catalogue is HIDDEN on the shipped configuration
+# (`auth.HIDDEN_BLUEPRINTS`, 11 September 2026). This module exercises its
+# pages, so it runs with the toggle emptied — it keeps proving `product.py`
+# for the day the module is un-hidden. The hidden state itself is covered by
+# `tests/test_product_hidden.py`.
+pytestmark = pytest.mark.usefixtures("catalogue_unhidden")
+
+
+# Rules that legitimately render no app chrome, each with its reason. A page
+# added later is checked unless it is named here, and naming one is a decision
+# somebody has to write down.
+NO_CHROME = {
+    "/static/<path:filename>": "no /static folder exists; assets are data URIs",
+    # The print-only routes. `/boq/print` set this shape: the document alone
+    # behind a `.no-print` action bar, because the nav is furniture and the
+    # sheet is the deliverable. They still load the shared stylesheet, which is
+    # the half this file checks for them. From 14 September 2026 EVERY print
+    # route has this shape — `tests/test_print_golden.py::
+    # test_no_print_route_renders_the_nav` sweeps all nine by name.
+    "/po/print/<id>":  "print-only: the document alone, /boq/print's shape",
+    "/dc/print/<id>":  "print-only: the document alone, /boq/print's shape",
+    "/boq/print/<id>": "print-only: the document alone",
+    # The two pages reached while logged OUT. `_nav()` links to Projects and
+    # Settings and carries the settings dot and the persistence strip — every
+    # one of which is either a refusal or a leak to somebody with no session, so
+    # these two carry `auth.AUTH_STANDALONE_STYLES` instead of BASE_STYLES.
+    # They are the only two exemptions in this app that are not print routes,
+    # and the reason is the session, not the paper.
+    "/login":  "reached logged out: no nav, because every nav link would refuse",
+    "/setup":  "reached logged out, and only while no user exists; redirects after that",
+    # The PUBLIC landing page (white-label, October 2026) — for a visitor who
+    # has not signed in, for the same reason as the two above, and it is also
+    # exported as a static file (`tools/export_landing.py`), which a page that
+    # leaned on the app's shared stylesheet could not be.
+    "/welcome/": "public, logged out, and exported as a static file: no shell",
+    # ⚠ Named on 14 September 2026, when the sweep started asking for the rail.
+    #   Market News never rendered `_nav()`: `extractor.py` imports `branding`
+    #   only and draws a dark look-alike of the OLD bar — a `<nav>` with a
+    #   `.nav-brand` span — which is why the old `<nav>` check passed on it.
+    #   It is four hard-coded articles behind a "+ Add to Quotation" button
+    #   that does nothing (ABOUT.md §5), and the rail opens it in a NEW TAB as
+    #   the standalone page it is. Giving it the shell means giving a decorative
+    #   page a real one, which is a decision about that page and not this
+    #   sweep's to take.
+    "/extractor/": "a standalone dark demo page that opens in a new tab; draws "
+                   "its own header, imports branding only, has never rendered "
+                   "_nav()",
+    # GSTIN auto-fill (29 September 2026). Not a page: the GST portal's CAPTCHA
+    # image, or a JSON refusal, fetched by the address form's own script. The
+    # edit form's twin takes an id and is outside this sweep already.
+    "/address/gst/captcha": "not a page: a CAPTCHA image or JSON for the "
+                            "address form's script",
+}
+
+# The screen routes the last three passes added. Listed explicitly as well as
+# swept, so that deleting one from the app is a red test rather than a quietly
+# smaller sweep.
+NEW_PAGES = ["/client/", "/po/", "/dc/", "/projects/", "/charge/",
+             "/measurement/"]
+
+
+@pytest.fixture()
+def populated(client):
+    """Enough of a store that every page has something to render."""
+    client.get("/boq/")
+    client.get("/settings/")
+    import address
+    seed_baseline("addresses")
+    bid = next(b for b, rec in STORE["boqs"].items() if not rec.get("supersedes"))
+    # CC-2 C1 — the order of working, enforced by URL from 29 August 2026.
+    # `/ra/create?leg=supply` refuses a schedule with no challan behind it, so
+    # a chrome sweep would be checking a redirect rather than a page. See
+    # `conftest.chain_ready()`.
+    from conftest import chain_ready
+    chain_ready(bid)
+    yield {"boq": bid}
+
+
+def _screen_urls(app_module, ids):
+    """Every parameterless GET rule, plus the id-taking ones we can fill."""
+    out = []
+    for rule in sorted(app_module.app.url_map.iter_rules(), key=lambda r: r.rule):
+        if "GET" not in rule.methods or rule.rule in NO_CHROME:
+            continue
+        if rule.arguments:
+            continue          # covered by test_entity_fallbacks.py's own sweep
+        out.append(rule.rule + ids.get(rule.rule, ""))
+    return out
+
+
+# What `chrome._nav()` puts on a screen page (14 September 2026): the rail,
+# the sticky top stack with the bar in it, the wordmark, and the shell's own
+# stylesheet and collapse script. A page that lost any one of these has lost
+# the chrome this file exists to sweep.
+SHELL_MARKUP = ('<nav class="rail"', '<div class="topstack">',
+                '<header class="topbar">', 'class="nav-brand"',
+                "window.railToggle")
+
+
+def test_every_screen_page_carries_the_shared_nav(populated, client):
+    """
+    `_nav()` is the only surface genuinely on every page, which is why both of
+    the app's standing warnings ride on it: the amber settings dot, and the red
+    persistence strip that means nothing is being saved. A page that draws its
+    own header instead loses both and looks fine doing it.
+
+    ⚠ **Extended to the rail on 14 September 2026.** The shell is a left rail
+    and a top bar now, and every screen page must carry BOTH — the rail with
+    the register entries, the bar with the page title and the user chip.
+    """
+    import app as app_module
+    ids = {"/ra/create": f"?boq={populated['boq']}&leg=supply",
+           "/po/create": f"?boq={populated['boq']}",
+           "/dc/create": f"?boq={populated['boq']}",
+           "/measurement/create": f"?boq={populated['boq']}"}
+
+    for url in _screen_urls(app_module, ids):
+        r = client.get(url)
+        assert r.status_code == 200, f"{url} did not render"
+        html = r.get_data(as_text=True)
+        for token in SHELL_MARKUP:
+            assert token in html, (
+                f"{url} does not render chrome._nav() ({token!r} is missing). "
+                f"Import it rather than drawing a header — the persistence "
+                f"strip and the settings dot both ride on it.")
+        # The rail names the registers; the bar names the page and the user.
+        assert 'title="Dashboard"' in html, f"{url}: the rail has no Dashboard entry"
+        assert '<div class="tb-name">' in html, f"{url}: the top bar has no title"
+
+
+def test_no_print_route_carries_the_rail(populated, client):
+    """
+    The other side of the sweep above, on two of the print routes the URL walk
+    skips: the shell must not reach a printed page. All nine print routes are
+    swept by name in `tests/test_print_golden.py`; this is the same fact from
+    this file's own exemption list, so the two cannot disagree about what a
+    print route is exempt from.
+    """
+    import json
+
+    vendor = next(a["id"] for a in STORE["addresses"].values()
+                  if a.get("type") == "vendor")
+    lines = [li for li in STORE["boqs"][populated["boq"]]["line_items"]
+             if not li.get("is_header")][:2]
+    r = client.post(f"/po/create?boq={populated['boq']}", data={
+        "date": "2026-08-15", "vendor_id": vendor, "notes": "",
+        "po_json": json.dumps({"lines": [{"line_id": li["line_id"],
+                                          "qty": "", "pcs": ""} for li in lines]})})
+    assert r.status_code == 302
+    pid = next(iter(STORE["purchase_orders"]))
+
+    for url in (f"/po/print/{pid}", f"/boq/print/{populated['boq']}"):
+        html = client.get(url).get_data(as_text=True)
+        for token in SHELL_MARKUP:
+            assert token not in html, f"{url} carries the app shell ({token!r})"
+
+    STORE["purchase_orders"].clear()
+
+
+def test_every_page_layers_its_css_after_the_shared_stylesheet(populated, client):
+    """
+    `BASE_STYLES` carries the reset, the nav, `.card`, `.btn`, `.alert`, the
+    footer and the 580px breakpoint. A page that skips it and writes its own
+    is a second design system.
+    """
+    import app as app_module
+    ids = {"/ra/create": f"?boq={populated['boq']}&leg=supply",
+           "/po/create": f"?boq={populated['boq']}",
+           "/dc/create": f"?boq={populated['boq']}",
+           "/measurement/create": f"?boq={populated['boq']}"}
+
+    for url in _screen_urls(app_module, ids):
+        html = client.get(url).get_data(as_text=True)
+        # A marker unique to BASE_STYLES rather than the constant itself: the
+        # test should fail on "this page has no shared stylesheet", not on
+        # "somebody edited a rule in it".
+        assert ".nav-brand" in html, f"{url} does not load BASE_STYLES"
+
+
+def test_the_printed_pages_load_the_shared_document_sheet(populated, client):
+    """
+    The other half. A print route may drop the nav — that is what `.no-print`
+    and `/boq/print` established — but it may not drop the A4 sheet, or it
+    prints a document with no frame, no letterhead and no print rules.
+
+    `/po/print` did exactly that: `QUOTATION_STYLES` without `VIEW_DOC_STYLES`,
+    so `.doc-outer` and `.page-frame` had no rules behind them at all.
+    """
+    import po_draft
+    import address
+    vendor = next(a["id"] for a in STORE["addresses"].values()
+                  if a.get("type") == "vendor")
+    lines = [li for li in STORE["boqs"][populated["boq"]]["line_items"]
+             if not li.get("is_header")][:2]
+    import json
+    r = client.post(f"/po/create?boq={populated['boq']}", data={
+        "date": "2026-08-15", "vendor_id": vendor, "notes": "",
+        "po_json": json.dumps({"lines": [{"line_id": li["line_id"],
+                                          "qty": "", "pcs": ""} for li in lines]})})
+    assert r.status_code == 302
+    pid = next(iter(STORE["purchase_orders"]))
+
+    for url in (f"/po/print/{pid}", f"/boq/print/{populated['boq']}"):
+        html = client.get(url).get_data(as_text=True)
+        assert ".page-frame" in html, f"{url} has no A4 sheet behind it"
+        # The action bar is `no-print` — a class token, so it may be combined
+        # with another (`screen-acts no-print`) and still be the same thing.
+        assert "no-print" in html, f"{url} prints its own screen chrome"
+
+    STORE["purchase_orders"].clear()
+
+
+@pytest.mark.parametrize("path", NEW_PAGES)
+def test_the_new_registers_are_reachable_from_the_dashboard(populated, client, path):
+    """
+    Not "the route exists" — **the user can get to it without typing a URL.**
+    The module zones on `/` are this app's launcher, and from 14 September
+    2026 the rail on every page names the same registers (ABOUT.md §5).
+    """
+    home = client.get("/").get_data(as_text=True)
+    assert f'href="{path}"' in home, (
+        f"{path} is not on the dashboard's module strip, so the only way to "
+        f"reach it is to know the URL.")
+
+
+def test_the_boq_side_purchase_forms_carry_the_shared_chrome(populated, client):
+    """
+    The sweep above walks parameterless rules only, so the two routes that raise
+    a real purchase order from the BOQ chain are checked by name here.
+
+    Both are ordinary screen pages in this app and must look like it: the shared
+    nav (which is where the persistence strip and the settings dot ride), the
+    shared stylesheet under their own, and no browser `confirm()` anywhere.
+
+    ⚠ `purchase.FROM_BOQ_STYLES` is layered **after** `BASE_STYLES`, never
+      instead of it, and is a separate constant from `PURCHASE_STYLES` because
+      `/purchase/view` loads that one and is hashed byte-for-byte in
+      `tests/test_print_golden.py`.
+    """
+    import json
+
+    import purchase
+    vendor = next(a["id"] for a in STORE["addresses"].values()
+                  if a.get("type") == "vendor")
+    lines = [li for li in STORE["boqs"][populated["boq"]]["line_items"]
+             if not li.get("is_header")][:2]
+    r = client.post(f"/po/create?boq={populated['boq']}", data={
+        "date": "2026-08-15", "vendor_id": vendor, "notes": "",
+        "po_json": json.dumps({"lines": [{"line_id": li["line_id"],
+                                          "qty": "", "pcs": ""} for li in lines]})})
+    assert r.status_code == 302
+    did = next(iter(STORE["purchase_orders"]))
+
+    for url in (f"/purchase/from-boq/{populated['boq']}",
+                f"/purchase/from-draft/{did}"):
+        res = client.get(url)
+        assert res.status_code == 200, f"{url} did not render"
+        html = res.get_data(as_text=True)
+        for token in SHELL_MARKUP:
+            assert token in html, f"{url} does not render chrome._nav() ({token!r})"
+        assert ".nav-brand" in html, f"{url} does not load BASE_STYLES"
+        assert "confirm(" not in html, f"{url} carries a browser confirm() dialog"
+        # Its own sheet is layered on top rather than replacing the shared one.
+        assert ".pk-rate" in html, f"{url} does not load FROM_BOQ_STYLES"
+
+    # The rules the picker's own stylesheet must NOT have grown: `/po/create`
+    # renders no rate column, and its page is pinned byte-for-byte.
+    assert ".pk-rate" not in purchase.BP.PICKER_CSS, (
+        "the rate column's CSS was added to the shared PICKER_CSS. That "
+        "constant is spliced into po_draft.PO_STYLES at a fixed character "
+        "position and /po/create is hashed — keep it in FROM_BOQ_STYLES.")
+    assert ".pk-rate" not in purchase.PURCHASE_STYLES, (
+        "a form rule was added to the sheet /purchase/view loads, which is a "
+        "printed document hashed in tests/test_print_golden.py.")
+
+    STORE["purchase_orders"].clear()
+
+
+def test_no_page_uses_a_browser_confirm_dialog(populated, client):
+    """
+    ABOUT.md §7.9f: `confirm()` is not a guard. It never runs for a
+    link-prefetching browser, a crawler, a chat client unfurling a pasted URL,
+    or the back button — each of which issues a plain GET. Destructive routes
+    render a confirmation PAGE and mutate only inside the POST branch.
+
+    Asserted over the rendered output rather than the source, because the sink
+    that matters is the one the browser receives.
+    """
+    import app as app_module
+    ids = {"/ra/create": f"?boq={populated['boq']}&leg=supply",
+           "/po/create": f"?boq={populated['boq']}",
+           "/dc/create": f"?boq={populated['boq']}",
+           "/measurement/create": f"?boq={populated['boq']}"}
+
+    for url in _screen_urls(app_module, ids):
+        html = client.get(url).get_data(as_text=True)
+        assert "confirm(" not in html, (
+            f"{url} carries a browser confirm() dialog. Render a confirmation "
+            f"page and destroy only in the POST branch — ABOUT.md §7.9f.")

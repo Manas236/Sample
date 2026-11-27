@@ -1,0 +1,62 @@
+# Secrets — never commit
+.env
+
+# The session signing key, minted on first run by auth.resolve_secret_key()
+# when neither QMS_SECRET_KEY nor SECRET_KEY is set. Committing it would
+# publish the value that signs every session cookie, which is the whole of what
+# the old hardcoded demo default got wrong (ABOUT.md §7 gap 8).
+secret_key.txt
+
+# Workbooks. The ones under fixtures/ and demo_files/ are SYNTHETIC — every
+# name and figure fictional — and are committed; fixtures/build_fixtures.py
+# rebuilds them. A real customer's workbook never belongs in this repository:
+# keep it outside the checkout (customer_docs/ is ignored for exactly that).
+customer_docs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Database dumps — confidential, and large. The folder is not tracked at all;
+# tools/backup_db.py creates it the first time it writes a backup.
+backups/
+
+# Attachments — CC-2 B8. Real files: a scanned supplier bill, a bank slip, a
+# cheque image. Commercial data belonging to the company, written at runtime by
+# attachment.py and served by nothing. Same reasoning as backups/ above, and
+# the same convention: a gitignored runtime directory at the repository root.
+# ⚠ Overridable with ATTACHMENT_DIR, so a deployment can put it on another
+#   volume. The tests point it at a temporary directory and never write here.
+attachments/
+
+# Timestamped editor backups — `ABOUT.md.bak.20260809-1305`, `ra.py.bak.…-corr`.
+# They were untracked but NOT ignored, so every `git status` listed twenty of
+# them and a `git add -A` would have committed the lot. Git history is the
+# revert point; these are not.
+*.bak
+*.bak.*
+
+Quote.html
+# A customer's own files, under the old folder name too. Never commit one.
+client_docs/
+
+# Dated scratch notes — `31AUG.md`, `2SEP.md`. A day's working notes, written
+# to the repository root and named after the date. They are not part of the
+# document set: INTRODUCTION.md §4 is the map, every file on it is deliberate,
+# and a 36-byte note reading "Updated Measurement Sheet" is a reminder to its
+# author rather than a record anyone else can read. Git history is where a
+# change is explained; PROGRESS.md is where a build state is recorded.
+# ⚠ They were untracked but NOT ignored, so every `git status --porcelain`
+#   reported the tree dirty and each pass had to take the same judgement call
+#   about a file nobody meant to commit. Same reasoning as `*.bak` above.
+[0-9][A-Z][A-Z][A-Z].md
+[0-9][0-9][A-Z][A-Z][A-Z].md

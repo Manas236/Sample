@@ -1,0 +1,1426 @@
+"""
+approval.py — the approval ladder  (CLIENT_CHANGES-2.md **B6** and **B7**)
+==========================================================================
+
+Built under the **fourth 29 August 2026** override block in `CLIENT_CHANGES.md`
+§0. Before that block B6 and B7 were gated and nothing here existed.
+
+What CC-2 actually says
+-----------------------
+**B6**, in full:
+
+    - **Charges:** three-step ladder — Director → Operations Head → HR, in sequence
+    - **RA / Tax Invoice / PO:** Operations Head + Director
+    - **Any one Director's approval is sufficient.** Confirmed by the client.
+
+    **Load-bearing rule:** a user cannot approve a record they created. This is
+    checked against the **record's creator**, not against the approver's role.
+
+Why the ladder is ROLES and the route gate is PERMISSIONS
+---------------------------------------------------------
+Two different questions, answered in two different places on purpose:
+
+* **"May you reach the approve route at all?"** — `auth.ROUTE_PERMISSIONS`,
+  keyed on `charge.approve` / `ra.approve` / `invoice.approve` /
+  `purchase.approve`. That is B5's default-deny registry doing its ordinary job,
+  and it stays the only answer to reachability.
+* **"Does your approval move this record one rung up its ladder?"** — this
+  module, keyed on the **roles** B4 names, because B6 states the ladder in role
+  names and a permission cannot say which rung somebody stands on.
+
+Keeping them apart is what lets an Owner suspend somebody's approval rights with
+a checkbox (drop `ra.approve`) without dismantling the ladder itself.
+
+⚠ **THE CREATOR GUARD IS NOT EXPRESSIBLE IN `ROUTE_PERMISSIONS`.** PROGRESS.md
+established that the registry cannot carry a per-record condition — it maps an
+endpoint to one permission string and knows nothing about which row is being
+acted on. So the guard is a per-view check, it is written **once** in
+`can_approve()` below, and `tests/test_approval.py` asserts that every approval
+endpoint reaches it. A rule enforced in six places is a rule that will be
+enforced in five after the next change.
+
+Which documents are approvable
+------------------------------
+CC-2 **B6** names four, and `DOCUMENTS` below is that list:
+
+    - **Charges:** three-step ladder — Director → Operations Head → HR, in sequence
+    - **RA / Tax Invoice / PO:** Operations Head + Director
+
+"PO" is the **real purchase order** (`purchase.py`, `STORE["purchases"]`) — the
+document this company issues to a vendor and the one A2's discount and A3's
+extra lines land on. It is not the draft PO (`po_draft.py`), which is a working
+sheet on the way to it and has no vendor holding it.
+
+⚠ **The spelling is "Operation Head".** CC-2 writes "Operations Head"; the
+application's role — `auth.BUILTIN_ROLES["operation-head"]` — is "Operation
+Head", and the application's spelling is the one that has to match a lookup.
+
+`created_by`
+------------
+Every approvable record gains `created_by`, captured **at the write site** from
+the session by `stamp_creator()`. Not derived later, not inferred from an audit
+log, and not optional: B6's load-bearing rule is that a user cannot approve a
+record they created, and a rule about the creator needs the creator recorded at
+the moment there is one.
+
+Records that predate this module — the grandfather rule
+--------------------------------------------------------
+Records written before the field existed have no creator, and neither obvious
+answer is acceptable: refusing approval outright strands live bills, and
+allowing anyone to approve while pretending the creator rule held would be a lie
+about records nobody checked.
+
+So a record backfilled by `tools/backfill_created_by.py` carries
+`created_by = None` **and** `pre_approval_system = True`, and:
+
+1. it **is** approvable by any holder of the relevant permission whose role sits
+   on the ladder — the creator guard cannot apply where there is no creator;
+2. it **prints**, because B7's gate cannot fairly be applied to a document
+   issued before the gate existed;
+3. it renders **on screen only** with a visible marker saying so — never on any
+   printed sheet;
+4. and the set is **pinned**. The migration records its own timestamp and count
+   in `STORE["settings"]["approval_migration"]`, and
+   `tests/test_approval_grandfather.py` fails if any record created after that
+   moment lacks a `created_by`. **That test is the point of the whole rule** —
+   without it the exception is a permanent hole that every future record can
+   fall into.
+
+A record with neither a `created_by` nor the grandfather mark — a test fixture,
+a demo seed — is treated as *creator unknown*: the guard cannot apply to it
+either. It is **not** counted in the pinned set, and the pin test is what stops
+that leniency reaching anything the application itself wrote.
+
+⚠ THE LADDER IS SWITCHED OFF — in code, for a trial period (12 September 2026)
+--------------------------------------------------------------------------------
+`LADDER_ON = False`, beside `DOCUMENTS`, read through `ladder_on()` and
+nothing else. CLIENT_CHANGES.md §0, the twenty-eighth block: 3B.05–3B.07 are
+deferred under the scope document as sequencing, the ladder returns after a trial
+period, and measurement approval goes off with it by the owner's own decision.
+**Built code stays and no bar moves** — B6, B7 and C2 are BUILT and this is a
+switch, not a removal. **Code only, no `/settings` control**: a toggle the
+client could reach would let them switch on deferred scope.
+
+While OFF, in this module and in everything that reads it:
+
+* `can_approve()` refuses everything, so no Approve / Reject action is ever
+  drawn and nothing can reach `approved` or `rejected`. The eight routes are
+  refused **at the gate** for everyone, an Owner included — `auth._gate()`
+  treats the `approval` blueprint as switched off, the hidden-blueprint
+  arrangement with its own reason, so a signed-in user gets a page saying so
+  and a stranger gets the ordinary login bounce. Nothing is written.
+* `can_print()` and `can_modify()` do not gate a PENDING record: it prints,
+  downloads (B8 reads `can_print()`), and edits and deletes follow the
+  document's own status rules as they stood before B6/B7. ⚠ **A decision
+  already taken is never overturned**: a record already APPROVED or REJECTED
+  behaves exactly as today — approved is locked and prints, rejected refuses
+  to print and returns to its creator. Both branches are checked BEFORE the
+  switch is consulted, which is what makes that true.
+* `cell()` and `panel()` draw nothing for a record with no decision on it —
+  no AWAITING chip, no ladder, no creator-unknown marker — so no queue, tile,
+  chip or band renders. A decided record still shows its decision.
+* the measurement ceiling is `measurement.feeds_ceiling()`'s business, and
+  it reads `accepted()` below: while OFF every saved sheet that is not
+  rejected counts, so `ra.overclaims()` keeps binding and its `{}`-means-
+  grandfather path never fires for a project that has sheets.
+
+**Every record created while OFF is STAMPED** — `RAISED_WHILE_OFF_FIELD`,
+written by `stamp_creator()` at the same moment `created_by` is, so it is
+written wherever the initial approval state is set today and never inferred
+from absence (`pre_approval_system`'s rule, and `grid_model`'s). When the
+switch goes back ON such a record is **never gated or queued** — `accepted()`
+says so — and shows a read-only *raised while approvals were off* mark;
+`can_approve()` refuses it by name. A record already PENDING before the switch
+went off carries no mark, so it returns to pending when the switch returns;
+it is deliberately not stamped, because that would rewrite stored data.
+`tests/test_approvals_off.py` holds all of it, and
+`tests/test_approval_grandfather.py` holds the raised-while-off set as a
+named set that only grows while OFF.
+"""
+
+import datetime
+
+from flask import Blueprint, redirect, request, url_for
+
+import auth
+import pipeline as P
+from store import STORE
+# The app chrome, from the leaf that owns it (14 September 2026). `_decision_page()`
+# reached it inside the function body while it lived in `dashboard.py`, which
+# every document module imports and which imports `auth`; the leaf imports
+# nothing that reaches back here, so the hatch is no longer needed.
+from chrome import BASE_STYLES, _nav
+
+approval_bp = Blueprint("approval", __name__, url_prefix="/approval")
+
+
+# =============================================================================
+# THE APPROVABLE DOCUMENTS  (B6)
+# =============================================================================
+# `steps` are **role slugs** — the keys of `auth.BUILTIN_ROLES`, not display
+# names and not permission ids. They are carried here from the first commit so
+# the migration and the pin test have one list of what "approvable" means,
+# rather than two that can drift apart.
+
+DOCUMENTS = {
+    "charge": {
+        "collection": "charges",
+        "label":      "charge",
+        "steps":      ("director", "operation-head", "hr"),
+        "sequential": True,
+        "permission": "charge.approve",
+        "list_endpoint": "charge.list_charges",
+    },
+    "ra": {
+        "collection": "ra_bills",
+        "label":      "RA bill",
+        "steps":      ("operation-head", "director"),
+        "sequential": False,
+        "permission": "ra.approve",
+        "list_endpoint": "ra.list_ras",
+        # ── B7's TWO NAMED EXCEPTIONS, narrowed 29 August 2026 (fifth block) ──
+        #
+        # Two lifecycle states of an RA bill print whatever their approval
+        # state, and **only** these two. Read `can_print()` for the reasoning;
+        # what belongs here is why it is DATA on one document rather than a
+        # rule in the function.
+        #
+        # ⚠ **A generic "a draft prints" rule would leak to the purchase
+        #   order.** `purchase.PO_STATUSES` carries "Draft" and "Cancelled" as
+        #   two of its six states, so a status test written in `can_print()`
+        #   itself would silently exempt every unapproved draft PO — a document
+        #   nobody narrowed anything for. The exemption is keyed to the one
+        #   document the override block names, and the three other entries
+        #   carry no `print_exempt_states` at all.
+        #
+        # ⚠ **The values are compared to the RAW `status` field, and that is
+        #   exactly equivalent to `ra.status_of()` for these two strings** —
+        #   `status_of()` returns the normalised value unchanged when it is one
+        #   of `ra.STATUSES`, and "draft" and "cancelled" both are. approval.py
+        #   may not import ra.py (ra.py imports this module), so the equivalence
+        #   is asserted in `tests/test_approval_b7.py` against `ra.status_of()`
+        #   over every status value rather than left to this comment.
+        "print_exempt_states": ("draft", "cancelled"),
+    },
+    # ── The SIXTH document, added 2 September 2026 with CC-2 **C3** ────────
+    #
+    # ⚠ **THE RA LADDER, AND THIS ONE CC-2 DOES SETTLE.** Unlike the
+    #   measurement below — which B6 does not name and where the ladder was our
+    #   choice — B6 gives *"RA / Tax Invoice / PO: Operations Head + Director"*,
+    #   and a merged RA is **both** of the first two at once: it is built from RA
+    #   bills and its entire purpose is to raise the tax invoice. Both of B6's
+    #   named documents carry this ladder, so there is nothing to choose between.
+    #   Nothing in CC-2 or in this module exempts a merged document.
+    #
+    # ⚠ **The permission is `ra.approve`, and no new one is minted.** A merged
+    #   document is an RA document: whoever may approve the two legs may approve
+    #   their sum. `invoice.approve` was the alternative and was checked rather
+    #   than assumed — **exactly the same three roles hold both** (Owner,
+    #   Director, Operation Head), so the choice confers nothing on anybody and
+    #   takes nothing from anybody. Minting `merged_ra.approve` instead would be
+    #   a seventh permission for the same three roles to be granted, and a
+    #   permission that reaches no role is the failure ABOUT.md §2g records
+    #   shipping three times.
+    #
+    # ⚠ **No `print_exempt_states`.** The RA bill has two because it has a
+    #   lifecycle that predates the ladder and a DRAFT overprint of its own. A
+    #   merged document has no draft state at all — it is raised from two bills
+    #   that are already issued — so there is no working copy to protect, and an
+    #   unapproved one simply does not print. Its **cancelled** state is
+    #   deliberately NOT exempt either: unlike a cancelled RA bill, which is the
+    #   audit record of a withdrawn claim, a cancelled merged document withdraws
+    #   only an invoice while both underlying claims go on standing on their own
+    #   and remain printable in their own right. The record that must be
+    #   producible is still producible.
+    "merged_ra": {
+        "collection": "merged_ras",
+        "label":      "merged RA document",
+        "steps":      ("operation-head", "director"),
+        "sequential": False,
+        "permission": "ra.approve",
+        "list_endpoint": "merged_ra.list_merged",
+    },
+    "invoice": {
+        "collection": "invoices",
+        "label":      "tax invoice",
+        "steps":      ("operation-head", "director"),
+        "sequential": False,
+        "permission": "invoice.approve",
+        "list_endpoint": "invoice.list_invoices",
+    },
+    "purchase": {
+        "collection": "purchases",
+        "label":      "purchase order",
+        "steps":      ("operation-head", "director"),
+        "sequential": False,
+        "permission": "purchase.approve",
+        "list_endpoint": "purchase.list_purchases",
+    },
+    # ── The FIFTH document, added 29 August 2026 with CC-2 **C2** ────────────
+    #
+    # ⚠ **B6 DOES NOT NAME THIS DOCUMENT.** CC-2's B6 gives a ladder to charges
+    #   (Director → Operation Head → HR, in sequence) and one to RA / Tax
+    #   Invoice / PO (Operation Head + Director). A measurement is on neither
+    #   list, and C2's three lines say nothing about approval beyond the word
+    #   "approved".
+    #
+    #   **The RA ladder was chosen, and the choice is OURS.** The reasoning: a
+    #   measurement exists for exactly one purpose, to feed an RA-Installation
+    #   bill, and the two documents claim against the same schedule. Putting a
+    #   different ladder under the number than under the claim built from it
+    #   would mean the quantity was agreed by one pair of people and the money
+    #   by another. The charges ladder is the alternative and is wrong for a
+    #   plain reason: it ends at HR, and HR has nothing to say about what was
+    #   measured on a site.
+    #
+    #   It is recorded as a judgement call in ABOUT.md §2i and in the fifth
+    #   29 August 2026 override block, and it is **one word to change here** if
+    #   the client wants a different one.
+    #
+    # ⚠ **No `print_exempt_states`.** The RA bill has two because it has a
+    #   lifecycle — draft / issued / cancelled — that predates the ladder and
+    #   carries its own overprint. A measurement's only state is where it stands
+    #   on its ladder, so an unapproved one simply does not print.
+    "measurement": {
+        "collection": "measurements",
+        "label":      "measurement sheet",
+        "steps":      ("operation-head", "director"),
+        "sequential": False,
+        "permission": "measurement.approve",
+        "list_endpoint": "measurement.list_ms",
+    },
+}
+
+# ── THE SWITCH (12 September 2026, CLIENT_CHANGES.md §0 twenty-eighth block) ─
+#
+# ⚠ **Shipped OFF, for a trial period, and this is the ONE line to flip.**
+#   `LADDER_ON = True` brings the whole ladder back — the eight routes, the
+#   gates, the queues, the chips and the measurement ceiling's approved-only
+#   reading — with no other edit anywhere. Read through `ladder_on()` and never
+#   directly: a reader that bound the constant at import would not see a
+#   fixture flip it, and the tests that keep proving the ladder for the day it
+#   returns run with it ON through exactly such a fixture.
+#
+# ⚠ **Code only. There is deliberately no `/settings` control** — 3B.05–3B.07
+#   are deferred scope, and a toggle the client could reach would let them
+#   switch it on.
+LADDER_ON = False
+
+
+def ladder_on() -> bool:
+    """Is the approval ladder in force? The one reader every surface uses."""
+    return LADDER_ON
+
+
+# The mark a record raised while the ladder was OFF carries. Written at create
+# by `stamp_creator()` and read by `raised_while_off()`; named once so the
+# stamp, the predicate, the dump tool and the tests cannot spell it four ways.
+RAISED_WHILE_OFF_FIELD = "raised_while_approvals_off"
+
+# The collection a document key writes to. `db.py` persists every one of these
+# already — no new table and no new collection, because an approval is a fact
+# ABOUT a document and lives on it.
+COLLECTIONS = {k: v["collection"] for k, v in DOCUMENTS.items()}
+
+# Where the migration writes its own record, under STORE["settings"]. Read by
+# `tests/test_approval_grandfather.py`, which is what pins the exception.
+MIGRATION_KEY = "approval_migration"
+
+# The mark a grandfathered record carries. Named once so the migration, the
+# predicate and the test cannot spell it three different ways.
+GRANDFATHER_FIELD = "pre_approval_system"
+
+# Status values a record's `approval_status` may hold. A record carrying no
+# value at all reads as `pending` — see `status_of()`.
+PENDING, APPROVED, REJECTED = "pending", "approved", "rejected"
+STATUSES = (PENDING, APPROVED, REJECTED)
+
+
+def _now() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def _esc(v) -> str:
+    return P.esc(str(v or ""))
+
+
+# =============================================================================
+# READING A RECORD
+# =============================================================================
+
+def records(doc_key: str) -> dict:
+    """The collection behind a document key, created on first use."""
+    coll = COLLECTIONS.get(doc_key)
+    if not coll:
+        return {}
+    return STORE.setdefault(coll, {})
+
+
+def find(doc_key: str, record_id: str):
+    """One record, or None. Never raises on an unknown document key."""
+    return records(doc_key).get(str(record_id or "")) or None
+
+
+def status_of(record) -> str:
+    """
+    The record's approval state, normalised to one of `STATUSES`.
+
+    **A record carrying no `approval_status` at all reads as `pending`**, which
+    is the safe answer: it is the state that grants nothing. Grandfathering is a
+    separate axis and is asked separately — see `is_grandfathered()`.
+    """
+    s = str((record or {}).get("approval_status") or "").strip().lower()
+    return s if s in STATUSES else PENDING
+
+
+def is_approved(record) -> bool:
+    return status_of(record) == APPROVED
+
+
+def is_rejected(record) -> bool:
+    return status_of(record) == REJECTED
+
+
+def is_grandfathered(record) -> bool:
+    """
+    Did this record exist before the approval system did?
+
+    True only for the explicit mark `tools/backfill_created_by.py` writes. It is
+    never inferred from a missing `created_by`, because inferring it is exactly
+    how the pinned set would grow — a record written next year with a bug in its
+    create route would quietly join a set that was closed in August.
+    """
+    return bool((record or {}).get(GRANDFATHER_FIELD))
+
+
+def raised_while_off(record) -> bool:
+    """
+    Was this record created while the ladder was switched OFF?
+
+    True only for the explicit mark `stamp_creator()` writes at create. Never
+    inferred from a missing `approval_status` or from the switch's state now —
+    a PENDING record that predates the switch going off carries no mark and
+    returns to pending the day the ladder returns, which is the point of the
+    distinction. `is_grandfathered()` makes the identical argument for
+    `pre_approval_system`, one closed set along.
+    """
+    return bool((record or {}).get(RAISED_WHILE_OFF_FIELD))
+
+
+def decided(record) -> bool:
+    """Has a decision been taken on this record — approved or rejected?"""
+    return is_approved(record) or is_rejected(record)
+
+
+def accepted(record) -> bool:
+    """
+    Does this record stand as ACCEPTED for whatever depends on it — the
+    measurement ceiling, the installation gate, a count of approved sheets?
+
+    * a REJECTED record never does — a decision taken is never overturned;
+    * an APPROVED one always does;
+    * a record raised while the ladder was OFF does, whatever the switch says
+      now — it was raised under a regime that took it as it stood, and
+      it can never be approved (it is not on the ladder);
+    * with the ladder OFF, every other saved record does.
+
+    ⚠ This is what keeps `ra.overclaims()`'s ceiling binding while OFF:
+    `measurement.feeds_ceiling()` is this function applied to a sheet, so a
+    project with saved sheets never reads as "predates measurement".
+    """
+    if is_rejected(record):
+        return False
+    if is_approved(record) or raised_while_off(record):
+        return True
+    return not ladder_on()
+
+
+def gated(record) -> bool:
+    """
+    Does the ladder apply to this record at all — may it be queued, and may
+    an undecided one be held back from printing or editing?
+
+    False while the ladder is OFF, and false for a record raised while it was
+    OFF, whatever the switch says now. A grandfathered record is on the ladder
+    (it may be approved) but is never held back — `can_print()` handles that
+    on its own, as it always has.
+    """
+    return ladder_on() and not raised_while_off(record)
+
+
+def creator_of(record) -> str:
+    """The user id that wrote this record, or `""` when nobody knows."""
+    return str((record or {}).get("created_by") or "")
+
+
+def creator_is_known(record) -> bool:
+    return bool(creator_of(record))
+
+
+# =============================================================================
+# WRITING THE CREATOR
+# =============================================================================
+
+# A distinct "argument not given" marker, because `None` is a meaningful value
+# here: `stamp_creator(rec, user=None)` means "explicitly nobody", which is what
+# a migration or a fixture passes, and it must not fall back to the session.
+_UNSET = object()
+
+
+def session_user():
+    """
+    The signed-in user, or None — **safe outside a request context.**
+
+    `auth.current_user()` reaches for `flask.session` and raises when there is no
+    request. This module is imported by `tools/backfill_created_by.py` and called
+    from fixtures, so the answer outside a request is "nobody", not an exception.
+    """
+    from flask import has_request_context
+
+    if not has_request_context():
+        return None
+    return auth.current_user()
+
+
+def stamp_creator(record, user=_UNSET) -> None:
+    """
+    Capture `created_by` at the write site.
+
+    Called from every create route of every approvable document. Writes the
+    session's user id, or `""` when there is no session — which only happens in
+    a fixture, since B5 refuses every one of those routes anonymously.
+
+    Pass `user=None` to mean **explicitly nobody**; omit the argument to mean
+    "whoever is signed in". The two are different questions and `_UNSET` is what
+    keeps them apart.
+
+    ⚠ It never writes `pre_approval_system`. That mark belongs to the migration
+    alone, and `tests/test_approval_grandfather.py` fails if anything else sets
+    it.
+
+    ⚠ **It DOES write `RAISED_WHILE_OFF_FIELD`, and only while the ladder is
+    OFF** (12 September 2026). This is the one place the initial approval
+    state of a record is set — every create route of every approvable
+    document calls it, and no create route writes `approval_status` — so it is
+    where the mark belongs: written at create, never inferred from absence.
+    With the ladder ON nothing is written and the key stays absent, so a
+    record raised while ON gets the normal ladder.
+    """
+    if not isinstance(record, dict):
+        return
+    user = session_user() if user is _UNSET else user
+    record["created_by"] = str((user or {}).get("id") or "")
+    if not ladder_on():
+        record[RAISED_WHILE_OFF_FIELD] = True
+
+
+# =============================================================================
+# READING A LADDER
+# =============================================================================
+
+def approvals_of(record) -> list:
+    """The rungs already climbed, oldest first. Always a list."""
+    got = (record or {}).get("approvals")
+    return list(got) if isinstance(got, list) else []
+
+
+def steps_taken(record) -> set:
+    """The set of role slugs whose rung has been climbed."""
+    return {str(a.get("role") or "") for a in approvals_of(record)}
+
+
+def approvers_of(record) -> set:
+    """The set of user ids that have already taken a rung on this record."""
+    return {str(a.get("user_id") or "") for a in approvals_of(record)}
+
+
+def outstanding_steps(doc_key: str, record) -> list:
+    """
+    The rungs still to climb, in ladder order.
+
+    For a sequential ladder the caller usually wants only the first of these;
+    `can_approve()` is what knows the difference.
+    """
+    spec = DOCUMENTS.get(doc_key) or {}
+    taken = steps_taken(record)
+    return [s for s in spec.get("steps", ()) if s not in taken]
+
+
+def role_slugs_of(user) -> set:
+    """
+    The role slugs a user holds.
+
+    Builtin roles carry the fixed id `role-<slug>` (`auth.ensure_builtin_roles`),
+    so the slug is recoverable from the id without a second lookup. A role
+    created through the UI carries a `uuid4` id and matches no ladder rung —
+    correct, since the ladder is stated in terms of B4's six roles and an
+    invented role is not one of them.
+    """
+    out = set()
+    for rid in (user or {}).get("role_ids") or []:
+        rid = str(rid or "")
+        if rid.startswith("role-"):
+            out.add(rid[len("role-"):])
+    return out
+
+
+def role_label(slug: str) -> str:
+    """The display name of a role slug — "Operation Head", not "operation-head"."""
+    role = auth.roles().get(f"role-{slug}")
+    if role and role.get("name"):
+        return str(role["name"])
+    got = auth.BUILTIN_ROLES.get(slug)
+    return got[0] if got else str(slug)
+
+
+def step_for(doc_key: str, record, user) -> str:
+    """
+    The rung `user` would climb — assumes `can_approve()` has already allowed it.
+
+    An Owner who holds no ladder role takes the lowest outstanding rung, so a
+    one-Owner installation can still move a document rather than deadlocking on
+    a role nobody has been given yet.
+    """
+    spec = DOCUMENTS.get(doc_key) or {}
+    outstanding = outstanding_steps(doc_key, record)
+    if not outstanding:
+        return ""
+    offered = [outstanding[0]] if spec.get("sequential") else outstanding
+    mine = role_slugs_of(user)
+    for slug in offered:
+        if slug in mine:
+            return slug
+    return offered[0]
+
+
+# =============================================================================
+# THE GUARD  (B6) — written ONCE, called from every approval site
+# =============================================================================
+
+def can_approve(doc_key: str, record, user=_UNSET) -> tuple:
+    """
+    `(allowed, reason)` — may `user` move this record one rung up its ladder?
+
+    ⚠ **THIS IS THE SINGLE APPROVAL GUARD AND EVERY APPROVAL SITE CALLS IT.**
+    `tests/test_approval.py::test_every_approval_endpoint_reaches_the_guard`
+    fails if an approval route is added that does not. Do not inline any part of
+    it at a call site: a rule enforced in six places is a rule that will be
+    enforced in five after the next change, and the fifth will be the one
+    somebody's money goes through.
+
+    The checks, in the order a person can act on them:
+
+    1. **The record has to exist**, and has to be an approvable kind.
+    2. **A finished ladder takes no more approvals.**
+    3. **A rejected record takes none either** — it goes back to whoever raised
+       it, and correcting it returns it to `pending`.
+    4. **THE CREATOR GUARD (B6's load-bearing rule).** The creator of a record
+       may not approve it. Checked against the *record's creator*, never against
+       the approver's role, exactly as CC-2 specifies — because CC-2's own
+       reason is that union permissions defeat the ladder, and a role test
+       cannot see a union.
+       It **cannot** apply where there is no creator. A grandfathered record, or
+       one written by a fixture, has nobody to compare against, and refusing
+       every such record would strand every bill that predates this module.
+    5. **One user, one rung.** A user who has already taken a rung on this
+       record may not take another. This is **ours, not CC-2's**, and it follows
+       CC-2's own stated reasoning to its next step: B4 lets one user hold
+       several roles, so without it a user holding Director *and* HR climbs two
+       thirds of the charges ladder alone — the "union permissions defeat the
+       ladder" failure one move along.
+    6. **The rung has to be yours.** A sequential ladder offers only its next
+       rung; an unordered one offers any rung still outstanding. An Owner
+       satisfies any rung (B3: "Everything") and is still bound by 4 and 5,
+       which is what keeps "Everything" from meaning "alone".
+    """
+    spec = DOCUMENTS.get(doc_key)
+    if not spec:
+        return False, "That is not an approvable document."
+    if not record:
+        return False, "That document no longer exists."
+
+    # -- 0. THE SWITCH ------------------------------------------------------
+    # Before the session, before the creator guard, before the rung: while
+    # the ladder is OFF nobody approves anything, an Owner included, and a
+    # record raised while it was OFF is never on the ladder afterwards.
+    if not ladder_on():
+        return False, SWITCHED_OFF_NOTE
+    if raised_while_off(record):
+        return False, (
+            f"This {spec['label']} was raised while approvals were switched "
+            f"off, so it is not on the ladder. It stands as raised.")
+
+    user = session_user() if user is _UNSET else user
+    if not user:
+        return False, "You are not signed in."
+
+    if is_approved(record):
+        return False, (
+            f"This {spec['label']} is already fully approved. There is nothing "
+            f"left to approve.")
+
+    if is_rejected(record):
+        why = str(record.get("reject_reason") or "").strip()
+        tail = f" - {why}" if why else ""
+        return False, (
+            f"This {spec['label']} was rejected{tail}. A rejected document goes "
+            f"back to whoever raised it; correcting it returns it to pending "
+            f"and the ladder starts again from the bottom.")
+
+    # -- 4. THE CREATOR GUARD ------------------------------------------------
+    uid = str(user.get("id") or "")
+    if creator_is_known(record) and creator_of(record) == uid:
+        return False, (
+            f"You raised this {spec['label']}, so you cannot approve it. "
+            f"Somebody else on the ladder has to.")
+
+    # -- 5. One user, one rung -----------------------------------------------
+    if uid in approvers_of(record):
+        return False, (
+            f"You have already approved this {spec['label']} once. One person "
+            f"cannot climb two rungs of the same ladder.")
+
+    # -- 6. Is this rung yours? ----------------------------------------------
+    outstanding = outstanding_steps(doc_key, record)
+    if not outstanding:
+        return False, f"This {spec['label']} has no outstanding approvals."
+
+    if auth.is_owner(user):
+        return True, ""
+
+    offered = [outstanding[0]] if spec["sequential"] else outstanding
+    if not (role_slugs_of(user) & set(offered)):
+        wanted = " or ".join(role_label(s) for s in offered)
+        return False, (
+            f"This {spec['label']} is waiting on {wanted}, and you do not hold "
+            f"that role.")
+    return True, ""
+
+
+# =============================================================================
+# WRITING AN APPROVAL
+# =============================================================================
+
+def record_approval(doc_key: str, record, user) -> str:
+    """
+    Write one rung. Returns the slug climbed, or `""` if nothing was written.
+
+    Callers must have asked `can_approve()` first; this does not re-ask, because
+    a guard that runs in two places is a guard that can disagree with itself.
+    """
+    slug = step_for(doc_key, record, user)
+    if not slug:
+        return ""
+    record.setdefault("approvals", []).append({
+        "role":      slug,
+        "role_name": role_label(slug),
+        "user_id":   str(user.get("id") or ""),
+        "user_name": str(user.get("display_name") or user.get("username") or ""),
+        "at":        _now(),
+    })
+    if outstanding_steps(doc_key, record):
+        record["approval_status"] = PENDING
+    else:
+        record["approval_status"] = APPROVED
+        record["approved_at"] = _now()
+    return slug
+
+
+def record_rejection(doc_key: str, record, user, reason: str) -> None:
+    """
+    Reject a record outright, at whatever rung it had reached.
+
+    The rungs already climbed are **kept** rather than cleared, so the record
+    still says who agreed with it before somebody did not. `clear_approvals()`
+    is what empties them, and it runs when the document is corrected.
+    """
+    record["approval_status"] = REJECTED
+    record["rejected_by"] = str(user.get("id") or "")
+    record["rejected_by_name"] = str(user.get("display_name")
+                                     or user.get("username") or "")
+    record["rejected_at"] = _now()
+    record["reject_reason"] = str(reason or "").strip()
+
+
+def clear_approvals(record) -> None:
+    """
+    Return a record to the bottom of its ladder.
+
+    Called whenever an approvable document's figures are edited: an approval
+    describes the document somebody read, so a changed document has not been
+    approved. Keeping the old rungs would let an edit inherit them.
+    """
+    if not isinstance(record, dict):
+        return
+    record["approvals"] = []
+    record["approval_status"] = PENDING
+    for key in ("approved_at", "rejected_by", "rejected_by_name",
+                "rejected_at", "reject_reason"):
+        record.pop(key, None)
+
+
+def migration_record() -> dict:
+    """
+    What the migration recorded about itself: when it ran and what it marked.
+
+    `{}` when it has never run — which is the state of a fresh database, where
+    there is nothing to grandfather because there is nothing older than this
+    module.
+    """
+    got = STORE.get("settings", {}).get(MIGRATION_KEY)
+    return dict(got) if isinstance(got, dict) else {}
+
+
+def grandfathered_ids(doc_key: str) -> list:
+    """Every record of one type carrying the grandfather mark, sorted."""
+    return sorted(rid for rid, rec in records(doc_key).items()
+                  if is_grandfathered(rec))
+
+
+def raised_while_off_ids(doc_key: str) -> list:
+    """
+    Every record of one type carrying the raised-while-off mark, sorted.
+
+    Its own named set beside the grandfathered one, and NOT the same set: a
+    grandfathered record predates the ladder and may still be approved; a
+    record raised while the ladder was OFF is never on it. The set grows only
+    while the ladder is OFF — `tests/test_approval_grandfather.py` proves it.
+    """
+    return sorted(rid for rid, rec in records(doc_key).items()
+                  if raised_while_off(rec))
+
+
+# =============================================================================
+# THE ON-SCREEN MARKER — screen only, NEVER on a printed sheet
+# =============================================================================
+# ⚠ **This must not be called from a printed document.** CC-2 carries no
+# requirement that anything about approval appears on paper, so nothing does,
+# and this marker is the piece most likely to be pasted onto a sheet by
+# accident. `tests/test_approval_b7.py` renders every pinned printed document
+# and asserts the string is absent from all of them.
+
+GRANDFATHER_NOTE = (
+    "This record predates the approval system, so who raised it is not known. "
+    "It can be approved by anyone on its ladder — the rule that a person "
+    "cannot approve their own record has nobody to check against here.")
+
+# What the switch says when it refuses. One sentence, used by the gate's page,
+# by `can_approve()` and by the tests, so the three cannot drift.
+SWITCHED_OFF_NOTE = (
+    "Approvals are switched off. Nothing can be approved or rejected while the "
+    "ladder is off; documents stand as raised and print as they are.")
+
+# The read-only mark a record raised while the ladder was OFF shows once the
+# ladder is back. Screen only, like every other marker in this section.
+RAISED_WHILE_OFF_NOTE = (
+    "Raised while approvals were switched off. It is not on the ladder and "
+    "cannot be approved or rejected; it stands as raised.")
+
+
+# =============================================================================
+# B7 — WHAT AN UNAPPROVED DOCUMENT MAY DO
+# =============================================================================
+# CC-2 **B7**, in full:
+#
+#     Real requirement: **an unapproved document may be viewed, but not printed
+#     or downloaded.**
+#
+#     - Gate the print and download routes on approval status
+#     - The view page needs a print stylesheet that blanks it, or `Ctrl+P`
+#       bypasses the gate
+#
+# ⚠ **B7 IS ABOUT PRINTING, NOT ABOUT EDITING.** It says nothing at all about
+# who may edit an approvable document or whether an approved one may be changed.
+# `can_modify()` below is **ours**, taken because an approval a later edit can
+# walk underneath is not an approval, and every one of its rules is listed as a
+# judgement call in ABOUT.md §2i.
+
+
+def can_print(doc_key: str, record) -> tuple:
+    """
+    `(allowed, reason)` — B7's gate, in one place.
+
+    A document that has not finished its ladder does not print, and the refusal
+    is **by URL** rather than by hiding the button — B5's rule, and the reason
+    `tests/test_approval_b7.py` requests every one of these addresses directly.
+
+    ⚠ **A grandfathered document prints.** It was issued before this gate
+    existed, and applying the gate retrospectively would make every bill the
+    client already holds unprintable on the day this shipped. That is the same
+    reasoning the grandfather rule rests on everywhere else in this module, and
+    it is why `tools/backfill_created_by.py` had to run before B7 could.
+
+    ⚠ **TWO STATES OF AN RA BILL ARE EXEMPT, and only these two.** Narrowed on
+    29 August 2026 under the fifth override block of that date, which reversed
+    the strict reading pass D shipped that morning. `print_exempt_states` on the
+    `ra` entry of `DOCUMENTS` is the whole of the exemption:
+
+    * **A DRAFT bill prints, carrying its DRAFT overprint.** B7 exists so an
+      unapproved **claim** cannot leave the building looking final. The
+      overprint is the opposite of that failure — it is itself the safeguard,
+      and gating the print removes the safeguard's purpose along with it. The
+      overprint must still render, and
+      `tests/test_approval_b7.py::test_every_draft_print_carries_the_DRAFT_overprint`
+      is what holds that: a draft that printed *clean* is the thing B7 is
+      actually guarding against, and it would be a worse outcome than either
+      reading.
+    * **A CANCELLED bill prints.** A cancelled bill is not a claim. It is the
+      audit record of a withdrawn one, and a record that cannot be produced is
+      not a record. `ra.can_delete()` already refuses to delete one for the same
+      reason.
+
+    **Every other unapproved state stays gated exactly as pass D built it** —
+    pending, part-climbed and rejected all still refuse by URL, and so does an
+    unapproved document of the other three types whatever its own status field
+    says. This is a narrowing of two named states, not a softening of B7.
+
+    ⚠ **What the narrowing reduces to on an RA bill, stated plainly:** the three
+    lifecycle states are `draft`, `issued` and `cancelled`, two of them are
+    exempt, so B7 on an RA bill is now exactly *"an **issued** bill prints only
+    once it is approved"*. That is the document B7 is about — the one that goes
+    to the main contractor.
+
+    ⚠ **The exemption is checked BEFORE the rejected clause, and that ordering
+    is a judgement call.** Lifecycle state and approval state are orthogonal
+    axes, so a bill can be a rejected draft. It prints, carrying its DRAFT
+    overprint, because the reason for the draft exemption is about what the
+    paper says rather than about where the record stands on its ladder — and a
+    sheet stamped DRAFT saying *"its figures may still change and it is not a
+    demand for payment"* is a true description of a rejected draft. A rejected
+    **issued** bill still refuses, which is the case that matters. The override
+    block's wording ("draft-state and cancelled-state only" against "rejected
+    still refuses") admits both readings; this one is recorded as ours.
+    """
+    spec = DOCUMENTS.get(doc_key)
+    if not spec:
+        return True, ""
+    if not record:
+        return False, "That document no longer exists."
+    if is_grandfathered(record):
+        return True, ""
+    if is_approved(record):
+        return True, ""
+    exempt = spec.get("print_exempt_states") or ()
+    if str(record.get("status") or "").strip().lower() in exempt:
+        return True, ""
+    if is_rejected(record):
+        # A decision taken is never overturned: a rejected document refuses
+        # to print whatever the switch says. Checked BEFORE the switch.
+        return False, (
+            f"This {spec['label']} was rejected, so it cannot be printed or "
+            f"downloaded. Correct it and put it back through the ladder. You "
+            f"can go on viewing it on screen.")
+    if not gated(record):
+        # The ladder is OFF, or this record was raised while it was: an
+        # undecided document is not held back. It prints, it downloads.
+        return True, ""
+    waiting = ", ".join(role_label(s) for s in outstanding_steps(doc_key, record))
+    return False, (
+        f"This {spec['label']} has not been approved, so it cannot be printed "
+        f"or downloaded. It is waiting on {waiting or 'approval'}. You can go "
+        f"on viewing it on screen.")
+
+
+# ── B7's second bullet: the print-blanking stylesheet ──────────────────────
+#
+# ⚠ **This is the WHOLE gate for the tax invoice and the purchase order, and
+# that is a finding rather than a choice.** Those two documents have **no
+# separate print route**: `/invoice/view/<id>` and `/purchase/view/<id>` render
+# the A4 sheet itself. B7's first bullet — "gate the print and download routes"
+# — assumes view and print are different URLs, which is true of the RA bill
+# (`/ra/view` and `/ra/print`) and false of these two. Gating their view route
+# would refuse the viewing B7 explicitly permits, so the stylesheet is what
+# enforces B7 there and the route stays open.
+#
+# ⚠ **Doubled braces.** This string is interpolated into f-string pages, so every
+# literal CSS brace is `{{` / `}}` — CLAUDE.md's most common way to break a page
+# here. It is written as a plain (non-f) string so the braces are single in the
+# source and survive one f-string interpolation at the call site.
+
+PRINT_BLOCK_MARKER = "approval-print-block"
+
+PRINT_BLOCK_CSS = """
+<style>
+@media print {
+  body > *:not(#approval-print-block) { display: none !important; }
+  #approval-print-block { display: block !important; }
+}
+</style>
+<div id="approval-print-block" style="display:none">
+  <h1 style="font-size:1.5rem;margin:0 0 1rem">Not approved &mdash; not for issue</h1>
+  <p style="font-size:1rem;line-height:1.6;max-width:34em">
+    This document has not completed its approval ladder. It may be read on
+    screen, but it is not to be printed or issued &mdash; printing it would
+    produce a document nobody has approved.
+  </p>
+</div>
+"""
+
+
+def print_block(doc_key: str, record) -> str:
+    """
+    The print-blanking stylesheet, or `""` when the document may be printed.
+
+    ⚠ **Emitting nothing for an approvable document is what keeps the pinned
+    print goldens byte-identical.** An approved sheet is exactly the page it was
+    before this module existed, which is why `tests/test_print_golden.py` did
+    not move by one byte for B7 — the golden records are approved, and an
+    approved document renders no blanking block.
+    """
+    allowed, _reason = can_print(doc_key, record)
+    return "" if allowed else PRINT_BLOCK_CSS
+
+
+def can_modify(doc_key: str, record, user=_UNSET) -> tuple:
+    """
+    `(allowed, reason)` — may this record's figures still be changed?
+
+    ⚠ **EVERY RULE HERE IS OURS, NOT CC-2's.** B7 is about printing and
+    downloading. It says nothing about editing, so the three questions the pass
+    brief raised — who may edit before submission, whether an approved document
+    may be edited at all, whether a rejected one returns to editable — are
+    **not settled by CC-2** and are settled here. Each takes the restrictive
+    reading except where the restrictive reading creates an unreachable state,
+    and that exception is argued rather than assumed.
+
+    It **layers on top of** each module's own rules and replaces none of them.
+    `ra.can_edit()` still refuses an issued bill; this refuses an approved one;
+    a caller asks both.
+
+    1. **An approved document is locked.** Amend it by raising the next
+       document — a corrected claim, a revised order — not by editing figures
+       two people have signed off. The restrictive reading of CC-2's silence,
+       and the one that makes an approval mean anything at all.
+    2. **A part-climbed ladder is locked too.** Once one rung is taken, an edit
+       would change what that approver approved while their name stays on it.
+       Have it rejected first; that sends it back.
+    3. **A rejected document returns to its creator, and only to its creator.**
+       ⚠ **The one place the restrictive option was NOT taken**, because there
+       it creates an unreachable state rather than a strict one: an issued RA
+       bill that is rejected and cannot be edited also cannot be deleted
+       (`ra.can_delete()` refuses an issued bill) and cannot be printed (B7). It
+       would be stranded with no move available to anybody. Editing it calls
+       `clear_approvals()` and the ladder starts from the bottom.
+    4. **Before any rung is climbed, only the creator edits.** Where there is no
+       creator — grandfathered, or a fixture — the guard cannot apply and the
+       module's own permission is the whole gate, exactly as in
+       `can_approve()`.
+
+    An Owner is exempt from the *creator* clauses (3 and 4) under B3's
+    "Everything", and is **not** exempt from 1 and 2: a locked document is
+    locked because of what it is, not because of who is asking.
+    """
+    spec = DOCUMENTS.get(doc_key)
+    if not spec:
+        return True, ""
+    if not record:
+        return False, "That document no longer exists."
+
+    user = session_user() if user is _UNSET else user
+    uid = str((user or {}).get("id") or "")
+
+    if is_approved(record):
+        return False, (
+            f"This {spec['label']} has been approved, so its figures are "
+            f"locked. Raise a corrected document rather than editing one that "
+            f"has been signed off.")
+
+    if is_rejected(record):
+        if creator_is_known(record) and creator_of(record) != uid \
+                and not auth.is_owner(user):
+            return False, (
+                f"This {spec['label']} was rejected and goes back to whoever "
+                f"raised it. You did not raise it.")
+        return True, ""
+
+    if not gated(record):
+        # The ladder is OFF, or this record was raised while it was: an
+        # undecided document follows its own module's rules and nothing here.
+        # The two decided branches above still bind — a decision taken is
+        # never overturned.
+        return True, ""
+
+    if approvals_of(record):
+        taken = ", ".join(sorted({str(a.get("role_name") or a.get("role") or "")
+                                  for a in approvals_of(record)}))
+        return False, (
+            f"This {spec['label']} has already been approved by {taken}, so it "
+            f"cannot be edited part-way up the ladder. Have it rejected first "
+            f"— that sends it back to whoever raised it.")
+
+    if creator_is_known(record) and creator_of(record) != uid \
+            and not auth.is_owner(user):
+        return False, (
+            f"This {spec['label']} was raised by somebody else and has not "
+            f"been approved yet. Only whoever raised it can change it.")
+
+    return True, ""
+
+
+_BADGE = ("display:inline-block;padding:2px 9px;border-radius:12px;"
+          "font-size:0.74rem;font-weight:700;letter-spacing:.02em;"
+          "border:1px solid;")
+
+_BADGES = {
+    PENDING:  ("AWAITING APPROVAL", "#fff8e1", "#8a6100", "#f0d089"),
+    APPROVED: ("APPROVED",          "#e8f6ec", "#1c6b33", "#a9d9b8"),
+    REJECTED: ("REJECTED",          "#fdecec", "#a32020", "#eeb4b4"),
+}
+
+
+def status_badge(record) -> str:
+    """The approval state as a coloured chip. Screen only."""
+    label, bg, fg, border = _BADGES[status_of(record)]
+    return (f'<span style="{_BADGE}background:{bg};color:{fg};'
+            f'border-color:{border}">{label}</span>')
+
+
+def grandfather_marker(record) -> str:
+    """
+    The visible "creator unknown" marker for a grandfathered record.
+
+    ⚠ **Screen only.** CC-2 carries no requirement that anything about approval
+    appears on paper, so nothing does, and this is the piece most likely to be
+    pasted onto a document by accident.
+    """
+    if not is_grandfathered(record):
+        return ""
+    return (
+        '<div style="margin:.6rem 0;padding:.55rem .8rem;border-radius:8px;'
+        'background:#f4f1ea;border:1px solid #ddd5c4;color:#5b513c;'
+        'font-size:0.82rem;line-height:1.45">'
+        '<b>Creator unknown.</b> ' + _esc(GRANDFATHER_NOTE) + '</div>')
+
+
+GRANDFATHER_CHIP_TITLE = (
+    "Creator unknown - this record predates the approval system")
+
+
+def grandfather_chip(record) -> str:
+    """
+    The compact form of the marker, for a table cell. Screen only.
+
+    A list row has no space for `GRANDFATHER_NOTE`, and the alternative — leaving
+    it off the list entirely — would mean the marker only appears on a page
+    somebody has already decided to open. So the chip is visible in the row and
+    carries the sentence in its `title`.
+    """
+    if not is_grandfathered(record):
+        return ""
+    return (f'<span title="{_esc(GRANDFATHER_CHIP_TITLE)}" '
+            f'style="{_BADGE}background:#f4f1ea;color:#5b513c;'
+            f'border-color:#ddd5c4">CREATOR UNKNOWN</span>')
+
+
+RAISED_WHILE_OFF_CHIP_TITLE = RAISED_WHILE_OFF_NOTE
+
+
+def raised_while_off_chip(record) -> str:
+    """
+    The read-only mark a record raised while the ladder was OFF shows once
+    the ladder is back on. Screen only. Draws nothing while the ladder is OFF
+    — then every undecided record stands the same way and the mark would say
+    nothing — and nothing for a record that carries no mark.
+    """
+    if not (ladder_on() and raised_while_off(record)):
+        return ""
+    return (f'<span title="{_esc(RAISED_WHILE_OFF_CHIP_TITLE)}" '
+            f'style="{_BADGE}background:#eef2f7;color:#3b4a5e;'
+            f'border-color:#c9d3e0">RAISED WHILE APPROVALS WERE OFF</span>')
+
+
+def raised_while_off_marker(record) -> str:
+    """The long form of the mark, for a record's own page. Screen only."""
+    if not (ladder_on() and raised_while_off(record)):
+        return ""
+    return (
+        '<div style="margin:.6rem 0;padding:.55rem .8rem;border-radius:8px;'
+        'background:#eef2f7;border:1px solid #c9d3e0;color:#3b4a5e;'
+        'font-size:0.82rem;line-height:1.45">'
+        '<b>Raised while approvals were off.</b> ' + _esc(RAISED_WHILE_OFF_NOTE) + '</div>')
+
+
+def cell(doc_key: str, record) -> str:
+    """
+    The list-row form: badge, grandfather chip, and whatever actions apply.
+
+    ⚠ **Screen only**, like everything else in this section.
+
+    ⚠ **While the ladder is OFF an undecided record draws NOTHING** — no
+    AWAITING chip, no creator-unknown chip, no actions: there is no queue for
+    it to be in. A record already decided still shows its decision. Once the
+    ladder is back, a record raised while it was off shows its read-only mark
+    and nothing else — it is not on the ladder.
+    """
+    if doc_key not in DOCUMENTS or not record:
+        return ""
+    if not ladder_on() and not decided(record):
+        return ""
+    if raised_while_off(record) and not decided(record):
+        return (f'<div style="display:flex;flex-direction:column;gap:.3rem;'
+                f'align-items:flex-start">{raised_while_off_chip(record)}</div>')
+    return (f'<div style="display:flex;flex-direction:column;gap:.3rem;'
+            f'align-items:flex-start">{status_badge(record)}'
+            f'{grandfather_chip(record)}'
+            f'<span>{actions(doc_key, record)}</span></div>')
+
+
+def ladder_summary(doc_key: str, record) -> str:
+    """
+    The rungs climbed and the rungs outstanding, as a screen block.
+
+    Returns `""` for a document key that has no ladder, so a caller can drop it
+    into a page without asking first.
+    """
+    spec = DOCUMENTS.get(doc_key)
+    if not spec or not record:
+        return ""
+    rows = []
+    for a in approvals_of(record):
+        who = _esc(a.get("user_name"))
+        rows.append(
+            f'<li><b>{_esc(a.get("role_name") or a.get("role"))}</b> &mdash; '
+            f'{who or "&mdash;"} <span style="color:#8a8578">'
+            f'{_esc(a.get("at"))}</span></li>')
+    for slug in outstanding_steps(doc_key, record):
+        rows.append(
+            f'<li style="color:#8a8578"><b>{_esc(role_label(slug))}</b> '
+            f'&mdash; awaiting</li>')
+    if is_rejected(record):
+        why = _esc(record.get("reject_reason"))
+        rows.append(
+            f'<li style="color:#a32020"><b>Rejected</b> by '
+            f'{_esc(record.get("rejected_by_name")) or "&mdash;"} '
+            f'<span style="color:#8a8578">{_esc(record.get("rejected_at"))}'
+            f'</span>{" &mdash; " + why if why else ""}</li>')
+    return ('<ul style="list-style:none;padding:0;margin:.4rem 0;'
+            'font-size:0.84rem;line-height:1.7">' + "".join(rows) + '</ul>')
+
+
+def actions(doc_key: str, record, user=_UNSET) -> str:
+    """
+    The Approve / Reject links for one record, or `""` when neither is offered.
+
+    Asks the same `can_approve()` the routes ask, so a button never appears
+    where the URL would refuse. ⚠ **The reverse is not a gate**: hiding a button
+    is not access control (B5's rule), and every one of these routes refuses by
+    URL on its own — `tests/test_approval.py` hits them directly to prove it.
+    """
+    user = session_user() if user is _UNSET else user
+    allowed, _reason = can_approve(doc_key, record, user)
+    if not allowed:
+        return ""
+    rid = _esc(record.get("id"))
+    return (
+        f'<a class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.78rem"'
+        f' href="{url_for("approval.approve_" + doc_key, id=rid)}">Approve</a> '
+        f'<a class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.78rem"'
+        f' href="{url_for("approval.reject_" + doc_key, id=rid)}">Reject</a>')
+
+
+def panel(doc_key: str, record) -> str:
+    """
+    The whole on-screen approval block: marker, badge, ladder, actions.
+
+    ⚠ **Screen only. Never call this from a printed document.**
+    `tests/test_approval_b7.py` renders every pinned printed sheet and asserts
+    none of these strings reaches one.
+    """
+    if doc_key not in DOCUMENTS or not record:
+        return ""
+    # While OFF an undecided record has no panel — see `cell()`. A decided
+    # one keeps its decision on the page, actions and all (there are none).
+    if not ladder_on() and not decided(record):
+        return ""
+    if raised_while_off(record) and not decided(record):
+        return raised_while_off_marker(record)
+    return (
+        '<div style="margin:.8rem 0;padding:.8rem 1rem;border-radius:10px;'
+        'background:#faf9f6;border:1px solid #e6e1d6">'
+        '<div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">'
+        '<b style="font-size:.8rem;letter-spacing:.04em;color:#6b6455">'
+        'APPROVAL</b>' + status_badge(record) + '</div>'
+        + grandfather_marker(record)
+        + ladder_summary(doc_key, record)
+        + '<div style="margin-top:.5rem">' + actions(doc_key, record) + '</div>'
+        + '</div>')
+
+
+# =============================================================================
+# THE APPROVAL ROUTES
+# =============================================================================
+# Eight endpoints — approve and reject, once per document type — registered from
+# the `DOCUMENTS` table rather than written out four times.
+#
+# ⚠ **Why eight endpoints and not one taking a `<doc_key>`.**
+# `auth.ROUTE_PERMISSIONS` maps an endpoint to exactly ONE permission string. A
+# single `/approval/approve/<doc_key>/<id>` route would have to be classified
+# once for four different permissions, which the registry cannot express — so it
+# would have to be gated at `AUTHENTICATED` with the real check hidden inside
+# the view, and that is precisely the weakening B5 exists to prevent. Four pairs
+# of endpoints keep the registry the whole answer to reachability.
+#
+# The bodies are generated, so the guard is still written once and there is
+# nothing to copy-paste out of step.
+
+
+def _decision_page(title: str, body: str) -> str:
+    """
+    A small page for a decision or a refusal.
+
+    `BASE_STYLES` and `_nav` are module-level imports of `chrome.py` since
+    14 September 2026. They were a function-body import of `dashboard` before
+    that — every document module imports this one, and `dashboard.py` was
+    imported by all of them — the escape hatch `auth._shell()` used for the
+    same reason (ABOUT.md §2). The leaf needs no hatch.
+    """
+    return (f"<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>{_esc(title)}</title>{BASE_STYLES}</head><body>"
+            f"{_nav()}<div class='wrap' style='max-width:760px'>{body}</div>"
+            f"</body></html>")
+
+
+def _refusal(doc_key: str, reason: str):
+    """
+    Refuse one approval decision, carrying the reason to the list page.
+
+    ⚠ **A redirect, not a 403, and the difference is load-bearing in two
+    directions.**
+
+    *House style*: this is a per-record business rule, and every other one in
+    this repo answers the same way — `ra.edit_ra()` and `ra.delete_ra()` bounce
+    to the record with `msg=why, type="error"` rather than rendering a refusal
+    page. A guard that refuses in a shape nothing else uses is a guard somebody
+    will handle differently at the next call site.
+
+    *And it must not look like the gate*: `auth._gate()` refuses with a 403 or a
+    bounce to `/login`, and `tests/test_nav_visibility.py::_is_refused` reads
+    exactly those two shapes to decide whether the **route** was refused. A 403
+    here would make every approval endpoint look permanently unreachable to that
+    sweep — `can_reach()` says a Director may approve, and it is right; what is
+    being refused is this record, today, for this person.
+
+    It is still a refusal **by URL**: nothing is written, and typing the address
+    achieves exactly what not typing it achieves. B5's rule is that hiding a
+    button is not a gate, and this is the gate.
+    """
+    spec = DOCUMENTS[doc_key]
+    return redirect(url_for(spec["list_endpoint"], msg=reason, type="error"))
+
+
+def _switched_off_page():
+    """
+    The page a signed-in user gets on an approval route while the ladder is
+    OFF. `auth._gate()` answers this BEFORE the view runs — a stranger gets
+    the login bounce there, a user without the permission gets this rather
+    than a permission refusal — so this is defence in depth: were the gate
+    ever loosened, nothing here writes.
+    """
+    return _decision_page(
+        "Approvals are switched off",
+        "<div class='page-top'><h1>Approvals are <span>switched off</span></h1></div>"
+        f"<p style='max-width:40em;line-height:1.6'>{_esc(SWITCHED_OFF_NOTE)}</p>"
+        "<p style='max-width:40em;line-height:1.6;color:#6b6455;font-size:.9rem'>"
+        "The ladder is off in code (<code>approval.LADDER_ON</code>) for a trial "
+        "period. Nobody can reach this page, an Owner included, until it is "
+        "switched back on. Your roles and their permissions are unchanged.</p>"), 403
+
+
+def _do_approve(doc_key: str, id: str):
+    if not ladder_on():
+        return _switched_off_page()
+    spec = DOCUMENTS[doc_key]
+    back = url_for(spec["list_endpoint"])
+    record = find(doc_key, id)
+    user = session_user()
+
+    # THE GUARD. One call, one place - see `can_approve()`.
+    allowed, reason = can_approve(doc_key, record, user)
+    if not allowed:
+        return _refusal(doc_key, reason)
+
+    if request.method != "POST":
+        return _decision_page(
+            "Approve",
+            f"<div class='page-top'><h1>Approve this "
+            f"<span>{_esc(spec['label'])}</span></h1></div>"
+            f"{grandfather_marker(record)}"
+            f"{ladder_summary(doc_key, record)}"
+            f"<form method='POST' style='display:flex;gap:.7rem;margin-top:1rem'>"
+            f"<button type='submit' class='btn'>Approve as "
+            f"{_esc(role_label(step_for(doc_key, record, user)))}</button>"
+            f"<a href='{back}' class='btn btn-ghost'>Not now</a></form>")
+
+    slug = record_approval(doc_key, record, user)
+    if outstanding_steps(doc_key, record):
+        msg = f"Approved as {role_label(slug)}."
+    else:
+        msg = f"Approved - this {spec['label']} is now fully approved."
+    return redirect(url_for(spec["list_endpoint"], msg=msg, type="success"))
+
+
+def _do_reject(doc_key: str, id: str):
+    if not ladder_on():
+        return _switched_off_page()
+    spec = DOCUMENTS[doc_key]
+    back = url_for(spec["list_endpoint"])
+    record = find(doc_key, id)
+    user = session_user()
+
+    # THE SAME GUARD. Rejecting is an approval decision, so it answers to the
+    # same rules — a creator may not reject their own record into the ground any
+    # more than they may approve it out of the ladder.
+    allowed, reason = can_approve(doc_key, record, user)
+    if not allowed:
+        return _refusal(doc_key, reason)
+
+    if request.method != "POST":
+        return _decision_page(
+            "Reject",
+            f"<div class='page-top'><h1>Reject this "
+            f"<span>{_esc(spec['label'])}</span></h1></div>"
+            f"{grandfather_marker(record)}"
+            f"{ladder_summary(doc_key, record)}"
+            f"<form method='POST' style='margin-top:1rem'>"
+            f"<label style='display:block;margin-bottom:.4rem'>Why is it being "
+            f"rejected?</label>"
+            f"<input type='text' name='reason' maxlength='300' "
+            f"style='width:100%;padding:.5rem;margin-bottom:.9rem'>"
+            f"<div style='display:flex;gap:.7rem'>"
+            f"<button type='submit' class='btn'>Reject</button>"
+            f"<a href='{back}' class='btn btn-ghost'>Not now</a></div></form>")
+
+    record_rejection(doc_key, record, user, request.form.get("reason") or "")
+    return redirect(url_for(spec["list_endpoint"],
+                            msg=f"{spec['label'].capitalize()} rejected.",
+                            type="success"))
+
+
+def _register_routes():
+    """
+    Mint `approve_<key>` and `reject_<key>` for every document in `DOCUMENTS`.
+
+    Written as a loop so the two view bodies exist once. Each endpoint still has
+    its own name and its own row in `auth.ROUTE_PERMISSIONS`, which is the whole
+    reason the routes are separate in the first place.
+    """
+    for key in DOCUMENTS:
+        def _approve(id, _k=key):
+            return _do_approve(_k, id)
+
+        def _reject(id, _k=key):
+            return _do_reject(_k, id)
+
+        _approve.__name__ = f"approve_{key}"
+        _reject.__name__ = f"reject_{key}"
+        approval_bp.add_url_rule(f"/approve/{key}/<id>",
+                                 endpoint=f"approve_{key}",
+                                 view_func=_approve,
+                                 methods=["GET", "POST"])
+        approval_bp.add_url_rule(f"/reject/{key}/<id>",
+                                 endpoint=f"reject_{key}",
+                                 view_func=_reject,
+                                 methods=["GET", "POST"])
+
+
+_register_routes()

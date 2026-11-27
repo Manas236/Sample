@@ -1,0 +1,124 @@
+# QMS — runtime dependencies
+#     pip install -r requirements.txt
+#
+# The dependency SET is derived from the app's actual imports, not from a
+# `pip freeze` of a system Python — INTRODUCTION.md §5.7. Only these seven are
+# imported by application code:
+#
+#     flask          every module
+#     markupsafe     address.py escapes with markupsafe.escape
+#     pymysql        db.py — MySQL persistence
+#     dotenv         db.py — reads .env
+#     PIL            photo.py — re-encodes profile photos (26 Sep 2026)
+#     openpyxl       sheetimport.py — reads an uploaded .xlsx BOQ (29 Sep 2026)
+#     xlrd           sheetimport.py — reads an uploaded .xls BOQ (29 Sep 2026)
+#
+# defusedxml is imported by NOTHING of ours and is still a runtime dependency:
+# openpyxl parses every .xlsx part through it when it is installed, and
+# sheetimport.py REFUSES an .xlsx when it is not (`openpyxl.xml.DEFUSEDXML`).
+#
+# The VERSIONS are pinned so a clone reproduces a known-good environment rather
+# than whatever PyPI resolves to that morning. They are the versions the suite
+# is verified against — `python -m pytest -q` in a .venv built from this file,
+# with openpyxl added (see the dev block below).
+#
+# Pins are only ever RAISED to a version the suite has been verified on, never
+# lowered: a pin below the installed version turns `pip install -r` into a
+# silent downgrade of whatever else shares that interpreter.
+#
+# Supported: CPython 3.10 to 3.14. Last verified on CPython 3.14.3 (Windows).
+# A single build number is wrong here — this repo is cloned on two machines
+# with different Pythons, and the app pins no interpreter-specific behaviour.
+
+Flask==3.1.3
+MarkupSafe==3.0.3      # address.py escapes with markupsafe.escape
+PyMySQL==1.2.0         # db.py — MySQL persistence
+python-dotenv==1.2.2   # db.py — reads .env
+Pillow==12.3.0         # photo.py — profile photos are re-encoded, never stored
+                       # as uploaded (strips GPS/EXIF, 192 px, ~10 KB). Imported
+                       # inside photo.encode(), so a box without it still boots
+                       # and the upload form says it is unavailable.
+
+# Import BOQ from Excel (29 Sep 2026). All three are imported inside
+# sheetimport.py's functions, never at module level — photo.py's arrangement —
+# so a box without them still boots and /boq/import says it is unavailable.
+openpyxl==3.1.5        # sheetimport.py — .xlsx, loaded read-only, never written
+et-xmlfile==2.0.0      # openpyxl's own dependency, pinned so the pair reproduces
+xlrd==2.0.2            # sheetimport.py — legacy .xls (BIFF) only; 2.x reads no .xlsx
+defusedxml==0.7.1      # openpyxl picks it up by itself; sheetimport.py refuses an
+                       # .xlsx while openpyxl.xml.DEFUSEDXML is False
+
+# Flask pulls these in itself. Pinned as well so an install is reproducible;
+# nothing in this app imports them directly.
+blinker==1.9.0
+click==8.3.1
+itsdangerous==2.2.0
+Jinja2==3.1.6
+Werkzeug==3.1.7
+
+# ── Not runtime ──────────────────────────────────────────────────────────────
+# Deliberately commented out, the same way the asset builder's deps are: these
+# are needed to develop or regenerate, never to run the app.
+#
+# To run the test suite (`python -m pytest -q`):
+#     pip install pytest==9.1.1
+# pytest==9.1.1
+#
+# To rebuild the synthetic test workbooks (`python fixtures/build_fixtures.py`)
+# and demo_files/sample_boq.xlsx: openpyxl, which is a RUNTIME pin above
+# from 29 September 2026.
+#
+# ⚠ openpyxl being ABSENT is one of TWO independent things that move
+#   the suite's total, and they are routinely confused for each other. The other
+#   is whether the two client workbooks are installed (they are gitignored — see
+#   fixtures/README.md). ABOUT.md §1 owns the full table; do not restate it here.
+#   ⚠ The paragraphs below were written while openpyxl was commented out of this
+#   file. They are kept as history; from 29 September 2026 `pip install -r
+#   requirements.txt` installs it, so a clone built from this file is ABOUT.md
+#   §1's row 2 without the extra step.
+#
+#   Measured on 15 August 2026, in a .venv with openpyxl AND both workbooks
+#   present: **611 passed, 0 skipped**.
+#
+#   This block used to say an environment without openpyxl reports "519 passed,
+#   4 skipped". Both halves were wrong. The total had drifted, and the skip
+#   count was never right at all: tests/test_fixtures.py holds its 4 tests
+#   behind a MODULE-LEVEL `pytest.importorskip("openpyxl")`, which raises during
+#   COLLECTION — so without openpyxl those 4 are never collected and pytest
+#   prints **1 skipped**, not 4. It is the kind of number that is only ever
+#   wrong in a document, because nobody re-reads it against a real run.
+#
+#   ~~openpyxl stays commented out because the app never reads a workbook at
+#   runtime; install it in the venv if you want the module collected.~~
+#   Superseded 29 September 2026: /boq/import reads an uploaded workbook at
+#   runtime, so openpyxl is pinned above with the other runtime dependencies.
+#
+# (There is no artwork build any more: the company logo is uploaded at
+#  /settings and re-encoded by logo.py with the Pillow pinned above.)
+#
+# ── Production WSGI server (9 September 2026) ────────────────────────────────
+# `python app.py` is the DEVELOPMENT server and must never face a network:
+# `app.run(debug=True, ...)` serves Werkzeug's interactive debugger, which is a
+# remote shell. `wsgi.py` is the production entry point:
+#
+#     pip install gunicorn==23.0.0
+#     gunicorn --workers 1 --threads 4 --bind 0.0.0.0:8000 wsgi:application
+#
+# ⚠ --workers 1 IS NOT A TUNING CHOICE. store.STORE is one dict in ONE
+#   process's RAM and db.sync() writes all of it back after every request, so a
+#   second worker is a second divergent copy of the whole application state,
+#   overwriting the first's records with no error of any kind. wsgi.py REFUSES
+#   to start under a second worker rather than let that happen silently —
+#   wsgi.py's header has the worked sequence and
+#   tests/test_wsgi_single_worker.py is the proof. Scale with --threads, which
+#   share one STORE; never with --workers.
+#
+# Commented out for the same reason as openpyxl: it is not needed to run the
+# dev server or the suite, and requirements.txt's pins exist so that installing
+# this file into a shared interpreter does not downgrade anything. gunicorn
+# does not run on Windows — on a Windows host use waitress instead, which has
+# no worker concept and so trips neither guard:
+#     pip install waitress==3.0.2
+#     waitress-serve --listen=0.0.0.0:8000 wsgi:application
+# gunicorn==23.0.0
+# waitress==3.0.2

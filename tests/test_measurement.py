@@ -1,0 +1,741 @@
+"""
+CC-2 **C2** — the measurement sheet, and the two guards that are its point.
+
+C2, **in full**, is three lines:
+
+    Raised from the BOQ. Approved measurements become the source of
+    installation quantity on RA-Installation.
+
+⚠ **Read that again before changing anything here.** Two of the things this file
+asserts are CC-2's, and everything else is **ours**:
+
+| assertion | whose |
+|---|---|
+| a sheet is raised from a BOQ | CC-2 |
+| an approved sheet is the source of installation quantity | CC-2 |
+| a measured quantity may not exceed the BOQ quantity | ours |
+| the measured quantity is cumulative across sheets | ours |
+| the RA ladder governs a measurement | ours |
+| the sheet prints at all | ours — and **no golden is pinned on it** |
+
+The distinction is not pedantry: it is the difference between a delivered
+requirement and unpriced work, and the fifth 29 August 2026 override block
+records each of them by name.
+
+⚠ **Every refusal here is hit at its URL.** Hiding a button is not a gate —
+B5's rule — and `/measurement/create` is a typeable address.
+"""
+
+import json
+
+import pytest
+
+import approval
+import boq as BQ
+import demo_seed as DS
+import measurement as MS
+import ra
+from store import STORE
+
+# ⚠ The approval ladder is switched OFF on the shipped configuration
+# (`approval.LADDER_ON`, 12 September 2026 — CLIENT_CHANGES.md §0, the
+# twenty-eighth block). This module proves the ladder, so it runs with the
+# switch ON through the `ladder_on` fixture and keeps proving it for the day
+# it returns; it is NOT rewritten into OFF checks. The OFF state itself is
+# covered by `tests/test_approvals_off.py`. The mark is in force before any
+# fixture creates a record, so nothing here is stamped raised-while-off.
+pytestmark = pytest.mark.usefixtures("ladder_on")
+
+
+from conftest import ensure_test_user, demo_boq_id
+
+
+# ── Fixtures ────────────────────────────────────────────────────────────────
+
+@pytest.fixture()
+def seeded(client):
+    """The fictional seed's 24-line BOQ, and nothing in front of it."""
+    STORE["ra_bills"].clear()
+    STORE.setdefault("measurements", {}).clear()
+    demo_boq_id()
+    yield demo_boq_id()
+    STORE["ra_bills"].clear()
+    STORE.setdefault("measurements", {}).clear()
+
+
+def priced(boq_id, n=None):
+    lines = [li for li in STORE["boqs"][boq_id]["line_items"]
+             if not li["is_header"] and li["total_qty"] > 0]
+    return lines[:n] if n else lines
+
+
+def payload(rows):
+    """rows: [(line_id, qty)] -> the hidden field's JSON."""
+    return json.dumps({"lines": [{"line_id": lid, "qty": str(q)}
+                                 for lid, q in rows]})
+
+
+def raise_sheet(client, boq_id, rows, date="2026-08-20", **extra):
+    """POST the create form. Returns the response."""
+    data = {"date": date, "location": "Block A", "measured_by": "R. Surveyor",
+            "witnessed_by": "", "notes": "", "ms_json": payload(rows)}
+    data.update(extra)
+    return client.post(f"/measurement/create?boq={boq_id}", data=data)
+
+
+def only_sheet():
+    return next(iter(STORE["measurements"].values()))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RAISED FROM THE BOQ — CC-2's first sentence
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_the_form_is_raised_against_a_schedule_and_refuses_without_one(client):
+    """`/measurement/create` with no BOQ has nothing to measure against."""
+    r = client.get("/measurement/create", follow_redirects=False)
+    assert r.status_code in (302, 303)
+    assert "/boq/" in r.headers["Location"]
+
+
+def test_the_form_shows_every_boq_line(client, seeded):
+    h = client.get(f"/measurement/create?boq={seeded}").get_data(as_text=True)
+    for li in STORE["boqs"][seeded]["line_items"]:
+        if li["is_header"]:
+            continue
+        assert li["line_id"] in h, f'{li["item_no"]} missing from the picker'
+
+
+def test_a_superseded_revision_is_refused_at_the_route(client, seeded):
+    """`/dc/create`, `/ra/create` and `/po/create` all make the same check."""
+    STORE["boqs"]["rev1"] = dict(STORE["boqs"][seeded], id="rev1", rev_no=1,
+                                 supersedes=seeded, ref="DP/BOQ/26-27/0002")
+    r = client.get(f"/measurement/create?boq={seeded}", follow_redirects=False)
+    assert r.status_code in (302, 303)
+    assert "superseded" in r.headers["Location"].lower().replace("+", " ")
+
+
+def test_a_sheet_snapshots_the_schedule_it_was_raised_against(client, seeded):
+    """
+    CLIENT_CHANGES.md §1.2 — the sheet reads as a historical record after the
+    schedule is revised. `print_ra()`'s original defect is why the rule exists.
+    """
+    li = priced(seeded, 1)[0]
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    ms = only_sheet()
+
+    assert ms["boq_id"] == seeded
+    assert ms["boq_ref"] == STORE["boqs"][seeded]["ref"]
+    row = ms["items"][0] if not ms["items"][0].get("is_header") else ms["items"][1]
+    assert row["description"] == li["description"]
+    assert row["unit"] == li["unit"]
+    assert row["boq_qty"] == float(li["total_qty"])
+
+
+def test_the_reference_is_fy_scoped_and_never_reissued(client, seeded):
+    lines = priced(seeded, 2)
+    raise_sheet(client, seeded, [(lines[0]["line_id"], 1)])
+    first = only_sheet()["ref"]
+    raise_sheet(client, seeded, [(lines[1]["line_id"], 1)])
+    refs = sorted(m["ref"] for m in STORE["measurements"].values())
+    assert refs[0] == first
+    assert refs == ["DP/MS/26-27/0001", "DP/MS/26-27/0002"]
+
+    # max+1, not len+1: deleting the second must not hand its number back.
+    second = next(m for m in STORE["measurements"].values()
+                  if m["ref"] == "DP/MS/26-27/0002")
+    STORE["measurements"].pop(second["id"])
+    assert MS.next_ref("2026-08-20") == "DP/MS/26-27/0002", (
+        "a deleted sheet handed its number back — a second sheet bearing a "
+        "number somebody has already signed is indistinguishable from the first")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GUARD 1 — measured may not exceed the BOQ quantity  (OURS)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_a_measured_quantity_above_the_schedule_is_refused(client, seeded):
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    r = raise_sheet(client, seeded, [(li["line_id"], li["total_qty"] + 1)])
+
+    assert r.status_code == 200, "the form should come back, not save"
+    assert not STORE["measurements"], "the sheet saved past its BOQ quantity"
+    h = r.get_data(as_text=True)
+    assert "Nothing was saved" in h
+    assert "over" in h
+
+
+def test_the_refusal_names_the_line_and_the_whole_arithmetic(client, seeded):
+    """
+    "Item 24.d is over" is not something anyone can act on. `35 in the
+    schedule, 21 already measured, 18 here, 4 over` is.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    h = raise_sheet(client, seeded,
+                    [(li["line_id"], li["total_qty"] + 5)]).get_data(as_text=True)
+    assert f"Item {li['item_no']}" in h
+    assert "in the schedule" in h
+    assert "already measured on other sheets" in h
+
+
+def test_measuring_exactly_the_schedule_is_allowed(client, seeded):
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    r = raise_sheet(client, seeded, [(li["line_id"], li["total_qty"])])
+    assert r.status_code in (302, 303), r.get_data(as_text=True)[:400]
+    assert len(STORE["measurements"]) == 1
+
+
+def test_the_guard_is_CUMULATIVE_across_sheets(client, seeded):
+    """
+    ⚠ **OURS, and the half that makes the guard worth having.** The rule stated
+    per line would let two sheets each measure the whole of a line while the
+    total came to twice the schedule. Real measurement happens in stages.
+    `ra.overclaims()` is cumulative for exactly this reason, one document along.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    half = li["total_qty"] / 2.0
+
+    r1 = raise_sheet(client, seeded, [(li["line_id"], half)])
+    assert r1.status_code in (302, 303)
+
+    r2 = raise_sheet(client, seeded, [(li["line_id"], half + 1)])
+    assert r2.status_code == 200, (
+        "a second sheet took the line past the schedule and was accepted — "
+        "the guard is per-sheet, not cumulative, and is decorative")
+    assert len(STORE["measurements"]) == 1
+
+    # The balance still measures.
+    r3 = raise_sheet(client, seeded, [(li["line_id"], half)])
+    assert r3.status_code in (302, 303)
+    assert len(STORE["measurements"]) == 2
+
+
+def test_a_REJECTED_sheet_releases_its_quantity(client, seeded):
+    """
+    A refused sheet is not competing for the schedule's quantity — the same
+    reasoning that makes `ra.claimed_by_line()` skip a cancelled bill. Leaving
+    it in the sum would permanently sterilise every quantity anybody ever got
+    wrong.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], li["total_qty"])])
+    only_sheet()["approval_status"] = approval.REJECTED
+
+    r = raise_sheet(client, seeded, [(li["line_id"], li["total_qty"])])
+    assert r.status_code in (302, 303), (
+        "a rejected sheet is still holding the line's quantity")
+
+
+def test_an_edit_is_not_compared_against_its_own_figures(client, seeded):
+    """
+    `exclude_id`. Without it an edit that changes nothing would refuse itself —
+    `ra.overclaims()` takes the same argument for the same reason and it is the
+    same bug one document over.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], li["total_qty"])])
+    ms = only_sheet()
+
+    r = client.post(f"/measurement/edit/{ms['id']}", data={
+        "date": ms["date"], "location": "Block B", "measured_by": "R. Surveyor",
+        "witnessed_by": "", "notes": "",
+        "ms_json": payload([(li["line_id"], li["total_qty"])])})
+    assert r.status_code in (302, 303), r.get_data(as_text=True)[:400]
+    assert STORE["measurements"][ms["id"]]["location"] == "Block B"
+
+
+def test_a_line_not_in_the_schedule_is_its_own_refusal():
+    """
+    `not_in_boq` rather than a zero ceiling, because the two send the reader
+    somewhere different — to the schedule, or to the site.
+    """
+    breaches = MS.overmeasures("nope", [{"line_id": "ffffffffffff",
+                                         "item_no": "9", "qty": 3.0}])
+    assert len(breaches) == 1
+    assert breaches[0]["reason"] == "not_in_boq"
+    assert "not in this schedule" in MS.overmeasure_message(breaches[0])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GUARD 2 — the approved measurement is the installation ceiling  (CC-2's)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _approve(ms):
+    """Approve a sheet directly. `conftest.printable()`'s reasoning."""
+    ms["approval_status"] = approval.APPROVED
+    return ms
+
+
+def test_only_an_APPROVED_sheet_feeds_the_ceiling(client, seeded):
+    """CC-2's own word: *"**Approved** measurements become the source."*"""
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], 2)])
+    ms = only_sheet()
+
+    assert MS.approved_qty_by_line(seeded) == {}, (
+        "a PENDING sheet is already feeding the installation ceiling — CC-2 "
+        "says approved measurements, and an unapproved one is a number "
+        "somebody typed")
+    assert not MS.has_approved_measurement(seeded)
+
+    _approve(ms)
+    assert MS.approved_qty_by_line(seeded)[li["line_id"]] == 2.0
+    assert MS.has_approved_measurement(seeded)
+
+
+def test_an_installation_claim_is_capped_at_the_measured_quantity(client, seeded):
+    """
+    ⚠ **CC-2's second sentence, in one assertion.** The line carries a BOQ
+    quantity well above the measured one, so a claim between the two proves the
+    ceiling moved from the schedule to the sheet.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 10)
+    raise_sheet(client, seeded, [(li["line_id"], 3)])
+    _approve(only_sheet())
+
+    claim = [{"line_id": li["line_id"], "item_no": li["item_no"], "qty": 4.0}]
+    breaches = ra.overclaims(seeded, "installation", claim)
+    assert breaches, (
+        "4 was claimed against 3 measured and passed — the installation "
+        "ceiling is still the BOQ quantity and C2's whole sentence is inert")
+    assert breaches[0]["reason"] == "overmeasured"
+    assert breaches[0]["approved"] == 3.0
+    assert "over the measurement" in ra.overclaim_message(breaches[0])
+
+    # And exactly the measured quantity passes.
+    claim[0]["qty"] = 3.0
+    assert ra.overclaims(seeded, "installation", claim) == []
+
+
+def test_the_SUPPLY_leg_keeps_the_BOQ_ceiling(client, seeded):
+    """
+    CC-2 says a challan proves the supply and says nothing about a quantity
+    flowing from one to the other. Deriving a supply ceiling from dispatch would
+    be inventing a rule — and the wrong one, because
+    `challan.BLOCK_OVER_DISPATCH` is False on purpose.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 10)
+    raise_sheet(client, seeded, [(li["line_id"], 3)])
+    _approve(only_sheet())
+
+    claim = [{"line_id": li["line_id"], "item_no": li["item_no"], "qty": 4.0}]
+    assert ra.overclaims(seeded, "supply", claim) == [], (
+        "the measurement lowered the SUPPLY ceiling — supply is proven by a "
+        "challan and CC-2 puts no quantity on that arrow")
+
+
+def test_a_line_the_sheet_did_not_measure_cannot_be_claimed(client, seeded):
+    """
+    Once one approved sheet exists, every line's installation ceiling comes from
+    measurement — including a line nobody measured, whose ceiling is nil. That
+    is the rule and not an edge case.
+
+    It gets its **own** refusal rather than "0 approved", because the latter
+    would be a lie about the BOQ and would send the operator to revise a
+    schedule that is fine.
+    """
+    a, b = priced(seeded, 2)
+    raise_sheet(client, seeded, [(a["line_id"], 1)])
+    _approve(only_sheet())
+
+    claim = [{"line_id": b["line_id"], "item_no": b["item_no"], "qty": 1.0}]
+    breaches = ra.overclaims(seeded, "installation", claim)
+    assert len(breaches) == 1
+    assert breaches[0]["reason"] == "not_measured"
+    msg = ra.overclaim_message(breaches[0])
+    assert "no approved measurement behind it" in msg
+    assert "Measure it" in msg, "the message does not say what to do next"
+    # It must NOT wear the over-claim message's words, which quote an approved
+    # quantity: "0 approved" reads as a defect in the schedule and sends the
+    # operator to revise a BOQ that is fine.
+    assert "approved," not in msg and "already claimed" not in msg, (
+        "the missing-measurement refusal is wearing the over-claim message")
+
+
+def test_a_project_with_no_measurement_keeps_the_BOQ_CEILING(client, seeded):
+    """
+    ⚠ **The grandfather rule at the arithmetic level.** Requiring a measurement
+    here would break every installation bill raised before this module existed.
+    `tests/test_measurement_pin.py` is what stops the exception growing.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    assert MS.approved_qty_by_line(seeded) == {}
+    claim = [{"line_id": li["line_id"], "item_no": li["item_no"],
+              "qty": li["total_qty"]}]
+    assert ra.overclaims(seeded, "installation", claim) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# APPROVAL — the ladder, which is OURS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_the_measurement_ladder_is_the_RA_LADDER_and_that_is_our_choice():
+    """
+    ⚠ **B6 names charges and RA / Tax Invoice / PO. It does not name a
+    measurement.** The RA ladder was chosen because a measurement exists to feed
+    an RA-Installation bill and the two claim against the same schedule; the
+    charges ladder ends at HR, who has nothing to say about what was measured on
+    a site.
+
+    If this ever fails, somebody changed the ladder — which is one word in
+    `approval.DOCUMENTS` and a decision for the client-facing owner, not a
+    refactor.
+    """
+    spec = approval.DOCUMENTS["measurement"]
+    assert spec["steps"] == approval.DOCUMENTS["ra"]["steps"] == (
+        "operation-head", "director")
+    assert spec["sequential"] is False
+    assert spec["sequential"] == approval.DOCUMENTS["ra"]["sequential"]
+
+
+def test_editing_a_sheet_sends_it_back_to_the_bottom_of_the_ladder(client, seeded):
+    """
+    An approval describes the document somebody read, so a changed document has
+    not been approved. `ra.edit_ra()` calls `clear_approvals()` for the reason.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    ms = only_sheet()
+    ms["approvals"] = [{"role": "operation-head", "role_name": "Operation Head",
+                        "user_id": "someone-else", "user_name": "X",
+                        "at": "2026-08-29 10:00"}]
+
+    # A part-climbed ladder is LOCKED (approval.can_modify), so the edit is
+    # refused rather than silently clearing the rung.
+    r = client.post(f"/measurement/edit/{ms['id']}", data={
+        "date": ms["date"], "location": "B", "measured_by": "", "witnessed_by": "",
+        "notes": "", "ms_json": payload([(li["line_id"], 2)])},
+        follow_redirects=False)
+    assert r.status_code in (302, 303)
+    assert approval.approvals_of(ms), "the rung was cleared by a refused edit"
+
+    # With no rung climbed, the edit goes through and clears nothing that was
+    # there — but it does return the record to pending explicitly.
+    ms["approvals"] = []
+    ms["approval_status"] = approval.APPROVED
+    ms["approval_status"] = approval.PENDING     # approved is locked; see below
+    r = client.post(f"/measurement/edit/{ms['id']}", data={
+        "date": ms["date"], "location": "B", "measured_by": "", "witnessed_by": "",
+        "notes": "", "ms_json": payload([(li["line_id"], 2)])})
+    assert r.status_code in (302, 303), r.get_data(as_text=True)[:400]
+    assert approval.status_of(ms) == approval.PENDING
+
+
+def test_an_approved_sheet_is_locked_at_its_edit_and_delete_URLs(client, seeded):
+    """
+    `approval.can_modify()` — ours, not CC-2's. An approved sheet is the ceiling
+    a claim was checked against; editing it behind the claim moves the ceiling
+    under a bill that has already been raised.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    ms = _approve(only_sheet())
+
+    for url in (f"/measurement/edit/{ms['id']}",
+                f"/measurement/delete/{ms['id']}"):
+        r = client.get(url, follow_redirects=False)
+        assert r.status_code in (302, 303), f"{url} rendered on an approved sheet"
+    assert client.post(f"/measurement/delete/{ms['id']}").status_code in (302, 303)
+    assert ms["id"] in STORE["measurements"], "an approved sheet was deleted"
+
+
+def test_GET_on_the_delete_route_destroys_nothing(client, seeded):
+    """
+    ⚠ **The hand-written GET test every new delete route must ship.**
+    ABOUT.md §7.9f, and `tests/test_delete_methods.py` says in terms that its
+    URL-map sweep **cannot** catch a both-verbs route that destroys on GET — it
+    only proves the rule accepts POST. A browser prefetch, a crawler, a link
+    unfurler or the back button all issue a plain GET, and none of them sees a
+    `confirm()` dialog.
+    """
+    li = priced(seeded, 1)[0]
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    mid = only_sheet()["id"]
+    before = dict(STORE["measurements"])
+
+    r = client.get(f"/measurement/delete/{mid}")
+
+    assert r.status_code == 200, "the GET must render a page, not redirect"
+    assert STORE["measurements"] == before
+    assert mid in STORE["measurements"]
+
+    h = r.get_data(as_text=True)
+    assert 'method="POST"' in h
+    assert "Delete it" in h and "Cancel" in h
+
+
+def test_POST_on_the_delete_route_destroys(client, seeded):
+    li = priced(seeded, 1)[0]
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    mid = only_sheet()["id"]
+
+    r = client.post(f"/measurement/delete/{mid}", follow_redirects=False)
+    assert r.status_code in (302, 303)
+    assert mid not in STORE["measurements"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# A SHEET A CLAIM RESTS ON — `MS.can_delete()`, 30 August 2026
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Pass E shipped `/measurement/delete/<id>` with this open and said so in the
+# route's own docstring: deleting a sheet an installation claim was built on
+# lowers the ceiling `ra.overclaims()` reads, so a bill that was legal becomes
+# one that could not be raised today. The issued figures do not move — claim
+# rows are snapshots — but the project's remaining balance does.
+#
+# ⚠ **What this actually closes is narrower than it first looks, and the
+#   narrowness is the point.** An APPROVED sheet was already undeletable:
+#   `approval.can_modify()` rule 1 locks it, an Owner included, and
+#   `test_an_approved_sheet_is_locked_at_its_edit_and_delete_URLs` above has
+#   asserted that since pass E. Since only an approved sheet feeds the ceiling,
+#   the common case was shut before `can_delete()` existed. The hole was the
+#   sheet that was approved and has since been REJECTED — editable and
+#   deletable by its creator, and deleting it destroys the basis document for a
+#   claim already raised.
+
+
+def _installation_bill(boq_id, lines, ra_no=1):
+    """One issued installation claim resting on the chain."""
+    STORE.setdefault("ra_bills", {})[f"ms-guard-ra{ra_no}"] = {
+        "id": f"ms-guard-ra{ra_no}", "ref": f"GUARD/RA{ra_no}", "ra_no": ra_no,
+        "leg": "installation", "boq_id": boq_id, "status": "issued",
+        "claims": [{"line_id": li["line_id"], "qty": 1.0} for li in lines],
+        "created_by": "somebody-else", "approval_status": approval.APPROVED,
+    }
+
+
+def test_a_rejected_sheet_with_a_claim_against_it_refuses_deletion_by_URL(
+        client, seeded):
+    """
+    ⚠ **The hole pass E left, closed and asserted by URL rather than by hiding
+    the button** — B5's standing rule and `ra.can_delete()`'s shape.
+
+    Approved, claimed against, then rejected. `can_modify()` hands a rejected
+    sheet back to its creator, so without `can_delete()` this POST destroys the
+    document the claim was measured from.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], 2)])
+    ms = _approve(only_sheet())
+    _installation_bill(seeded, [li])
+
+    ms["approval_status"] = approval.REJECTED
+    assert approval.can_modify("measurement", ms)[0], (
+        "fixture is wrong: can_modify must ALLOW here, or this test proves "
+        "nothing about can_delete")
+
+    allowed, why = MS.can_delete(ms)
+    assert not allowed
+    assert "RA1" in why, f"the refusal must name the bill that rests on it: {why}"
+
+    assert client.get(f"/measurement/delete/{ms['id']}").status_code in (302, 303), \
+        "the GET confirm page must refuse too, not offer a delete it will not honour"
+    assert client.post(f"/measurement/delete/{ms['id']}").status_code in (302, 303)
+    assert ms["id"] in STORE["measurements"], (
+        "a sheet an installation claim rests on was deleted by URL")
+
+
+def test_a_draft_nobody_submitted_is_still_deletable_on_a_claimed_project(
+        client, seeded):
+    """
+    ⚠ **The trap the guard must NOT set.** Refusing on "a claim exists anywhere
+    on this chain" alone would strand a sheet raised by mistake on a live
+    project with no way to remove it, ever. A sheet that never entered the
+    ladder was never the basis of anything.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], 2)])
+    ms = only_sheet()
+    _installation_bill(seeded, [li])
+
+    assert not MS.has_ladder_history(ms)
+    assert MS.can_delete(ms)[0], "an unsubmitted draft must stay deletable"
+
+    assert client.post(f"/measurement/delete/{ms['id']}").status_code in (302, 303)
+    assert ms["id"] not in STORE["measurements"]
+
+
+def test_a_supply_claim_does_not_lock_a_measurement(client, seeded):
+    """
+    C1 keeps the two legs apart: a supply claim is proved by a delivery challan
+    and no quantity flows to it from a measurement. So a supply bill rests on
+    nothing here, and locking the sheet for one would be a refusal with no
+    reason behind it.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], 2)])
+    ms = _approve(only_sheet())
+    _installation_bill(seeded, [li])
+    STORE["ra_bills"]["ms-guard-ra1"]["leg"] = "supply"
+
+    ms["approval_status"] = approval.REJECTED
+    assert MS.installation_claims_on_chain(seeded) == []
+    assert MS.can_delete(ms)[0], "a supply claim locked a measurement sheet"
+
+
+def test_a_claim_with_no_quantity_locks_nothing(client, seeded):
+    """
+    A bill claiming zero has taken nothing off the ceiling, so nothing rests on
+    the sheet. `boq.claims_against_chain()` skips a zero-quantity claim for the
+    same reason and this agrees with it by construction.
+    """
+    li = next(x for x in priced(seeded) if x["total_qty"] >= 4)
+    raise_sheet(client, seeded, [(li["line_id"], 2)])
+    ms = _approve(only_sheet())
+    _installation_bill(seeded, [li])
+    for c in STORE["ra_bills"]["ms-guard-ra1"]["claims"]:
+        c["qty"] = 0.0
+
+    ms["approval_status"] = approval.REJECTED
+    assert MS.installation_claims_on_chain(seeded) == []
+    assert MS.can_delete(ms)[0]
+
+
+def test_a_measurement_records_who_raised_it(client, seeded):
+    """B6's load-bearing rule needs a creator recorded at the write site."""
+    li = priced(seeded, 1)[0]
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    assert only_sheet()["created_by"] == ensure_test_user()["id"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE PRINTED SHEET — ours, and deliberately not pinned
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_an_unapproved_sheet_does_not_print_and_the_refusal_is_at_the_URL(
+        client, seeded):
+    """B7, on the fifth document. There is no draft/cancelled exemption here."""
+    li = priced(seeded, 1)[0]
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    ms = only_sheet()
+
+    r = client.get(f"/measurement/print/{ms['id']}", follow_redirects=False)
+    assert r.status_code in (302, 303)
+    assert client.get(f"/measurement/view/{ms['id']}").status_code == 200, (
+        "B7 permits the viewing and refuses only the printing")
+
+    _approve(ms)
+    assert client.get(f"/measurement/print/{ms['id']}").status_code == 200
+
+
+def test_the_printed_sheet_reuses_the_shared_document_furniture(client, seeded):
+    """
+    ⚠ **CC-2 is silent on whether a measurement prints, so NOTHING was
+    invented.** No golden is pinned on this page. What is asserted is that the
+    page is built out of `docsheet.py`'s existing chrome rather than a
+    letterhead somebody drew — which is the whole of what the silence permits.
+    """
+    li = priced(seeded, 1)[0]
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    _approve(only_sheet())
+    h = client.get(f"/measurement/print/{only_sheet()['id']}").get_data(as_text=True)
+
+    # ⚠ **REWRITTEN 6 September 2026 for the JOINT MEASUREMENT SHEET.** The old
+    #   assertion is kept here verbatim rather than edited away, because what it
+    #   asserted is still mostly true and the two markers that moved are the
+    #   interesting part:
+    #
+    #       for marker in ('<table class="page-frame">', '<div class="doc-box">',
+    #                      '<div class="doc-header', '<div class="items-wrap">',
+    #                      '<div class="sig-block">'):
+    #           assert marker in h, f"the printed sheet does not carry {marker}"
+    #       assert "MEASUREMENT SHEET" in h
+    #
+    #   `items-wrap` and `sig-block` are gone from THIS sheet, and neither is a
+    #   letterhead somebody drew:
+    #
+    #   * **`items-wrap`** comes from `docsheet.items_table()`, which builds a
+    #     ONE-row table head. The joint sheet's head is two rows deep with
+    #     spanning `SUPPORTS` and `SPRINKLER` cells above their sub-columns —
+    #     a shape `items_table()` cannot express and must not be bent into
+    #     expressing, because every other document depends on it.
+    #   * **`sig-block`** is a single-signatory block. This document is
+    #     *joint*: it is countersigned by the main contractor's site engineer,
+    #     so the foot is two parties side by side with four label rows each.
+    #     That structure is the whole reason the document has its name.
+    #
+    #   Everything that CAN be shared still is, and that is what is asserted
+    #   below — the page frame, the letterhead inside it, the doc box and the
+    #   header block. See CLIENT_CHANGES.md §0, twenty-third block.
+    for marker in ('<table class="page-frame">', '<div class="doc-box">',
+                   '<div class="doc-header'):
+        assert marker in h, f"the printed sheet does not carry {marker}"
+    assert "JOINT MEASUREMENT SHEET" in h
+
+    # The letterhead is `docsheet.letterhead()`'s and not a second one drawn
+    # here — the standing rule that a new document derived from an existing
+    # chain reuses the printed layout that already exists.
+    assert '<div class="lh">' in h and '<div class="lh-addr">' in h
+    # ...and it is inside the page frame's own <thead>, which is what makes it
+    # repeat on page two.
+    assert h.index("<thead>") < h.index('<div class="lh">')
+
+
+def test_no_money_reaches_the_printed_sheet(client, seeded):
+    """
+    A measurement is signed in the field by a site engineer. A rate on it turns
+    a measurement into a claim — `challan.py`'s rule, one document along.
+    """
+    li = next(x for x in priced(seeded) if float(x["install_rate"] or 0) > 0)
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    _approve(only_sheet())
+    h = client.get(f"/measurement/print/{only_sheet()['id']}").get_data(as_text=True)
+
+    assert MS.PRINT_RATES is False and MS.PRINT_TAX is False
+    assert MS.PRINT_TOTALS is False
+    assert "&#8377;" not in h and "Amount" not in h
+    assert f"{float(li['install_rate']):,.2f}" not in h
+
+
+def test_nothing_about_approval_reaches_the_printed_sheet(client, seeded):
+    """
+    CC-2 carries no requirement that anything about approval appears on paper.
+    `tests/test_approval_b7.py` sweeps every pinned sheet; this covers the one
+    that is not pinned.
+    """
+    li = priced(seeded, 1)[0]
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    _approve(only_sheet())
+    h = client.get(f"/measurement/print/{only_sheet()['id']}").get_data(as_text=True)
+
+    for s in ("APPROVED", "AWAITING APPROVAL", "CREATOR UNKNOWN",
+              approval.GRANDFATHER_NOTE, "Approve", "Reject"):
+        assert s not in h, f"the printed measurement carries {s!r}"
+
+
+def test_this_module_never_writes_our_own_identity_into_its_source():
+    """
+    `tests/test_ra_seller_identity.py`'s rule, applied to the third document
+    that prints who we are: a State name or a GSTIN-shaped literal in this file
+    is an identity that survives a `/settings` change.
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "measurement.py").read_text(encoding="utf8")
+    assert not re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z]\d\b", src), (
+        "a GSTIN-shaped literal is in measurement.py")
+    for state in ("Maharashtra", "Karnataka", "Gujarat", "Delhi"):
+        assert state not in src, f"the State name {state!r} is in measurement.py"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE REGISTER
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_the_register_lists_a_sheet_with_its_approval_state(client, seeded):
+    li = priced(seeded, 1)[0]
+    raise_sheet(client, seeded, [(li["line_id"], 1)])
+    h = client.get("/measurement/").get_data(as_text=True)
+    assert "DP/MS/26-27/0001" in h
+    assert "AWAITING APPROVAL" in h
+
+    _approve(only_sheet())
+    assert "APPROVED" in client.get("/measurement/").get_data(as_text=True)
+
+
+def test_the_boq_page_offers_the_measurement_chip_on_the_tip(client, seeded):
+    h = client.get(f"/boq/view/{seeded}").get_data(as_text=True)
+    assert f"/measurement/create?boq={seeded}" in h

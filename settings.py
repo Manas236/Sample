@@ -1,0 +1,1389 @@
+"""
+settings.py — Company Identity & Bank Details
+=============================================
+Blueprint  : settings_bp
+Mounted at : /settings  (registered in app.py)
+
+Routes
+------
+  GET,POST /settings/   — one form for everything company-specific
+
+Why this exists
+---------------
+`branding.py` is the single source of truth for company identity, and it was
+edited by hand. That is fine for a colour token and wrong for a GSTIN: the
+people who know the registered address and the bank account are not the people
+who open Python files. Every blank field prints as an amber "add …" chip on the
+quotation and the proforma invoice, so until they are filled in no document is
+ready to send — and the only way to fill them in was a code edit.
+
+How it works
+------------
+The values in `branding.py` remain the **defaults**. This page saves overrides
+to `STORE["settings"]["company"]` (persisted like any other collection) and
+calls `branding.apply_settings()`, which pushes them onto the branding module.
+Everything downstream keeps reading `B.COMPANY_ADDR` / `B.BANK_*` and picks the
+new values up on the next render — no restart.
+
+The one rule that makes that work: **read branding through the module.**
+`B.COMPANY_ADDR` sees an override; `from branding import COMPANY_ADDR` binds a
+copy at import and freezes on the default forever. `quotation.py` used to do
+exactly that and was fixed when this page was added.
+
+Clearing a field restores the default rather than saving a blank — see
+`branding.apply_settings()`.
+"""
+
+import re
+from datetime import date as _date
+
+from flask import Blueprint, request, redirect, url_for
+
+import branding as B
+import pipeline as P
+import series as SER   # the document-number FLOORS (25 Sep 2026)
+from chrome import BASE_STYLES, _nav
+from quotation import QUOTATION_STYLES
+from store import STORE
+
+settings_bp = Blueprint("settings", __name__, url_prefix="/settings")
+
+# The single record id. Company identity is a singleton — there is one company —
+# so it is one row rather than a collection, which keeps db.py unchanged.
+RECORD_ID = "company"
+
+
+# =============================================================================
+# FIELD DEFINITIONS — the form, the validation and the storage all read this
+# =============================================================================
+# (key, label, placeholder, validator or None)
+#
+# Every field is optional. A blank one falls back to the branding.py default and
+# prints as an amber chip if that default is blank too, which is the existing
+# and deliberate behaviour: a missing statutory detail must be visible, never
+# silently empty.
+
+_GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+_PAN_RE   = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+_IFSC_RE  = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_RE = re.compile(r"^[0-9+][0-9\s\-()]{6,19}$")
+# Indian bank account numbers run 9–18 digits; no bank uses letters.
+_ACCT_RE  = re.compile(r"^[0-9]{9,18}$")
+
+
+def _v_gstin(v):  return "" if _GSTIN_RE.match(v) else "GSTIN must be 15 characters, e.g. 27AAACA1234A1Z5."
+def _v_pan(v):    return "" if _PAN_RE.match(v)   else "PAN must be 10 characters, e.g. AAACA1234A."
+def _v_ifsc(v):   return "" if _IFSC_RE.match(v)  else "IFSC must be 11 characters, e.g. ABCD0001234."
+def _v_email(v):  return "" if _EMAIL_RE.match(v) else "That does not look like an e-mail address."
+def _v_phone(v):  return "" if _PHONE_RE.match(v) else "Phone should be digits, optionally with + - ( ) or spaces."
+def _v_acct(v):   return "" if _ACCT_RE.match(v)  else "Account number should be 9–18 digits, no spaces."
+
+# The trading name heads every letterhead and every browser tab. 60 characters
+# is a long name and a short letterhead line; control characters would break
+# the line and are never a deliberate part of a name.
+_NAME_RE  = re.compile(r"^[^\x00-\x1f\x7f]{1,60}$")
+# The document prefix: 1-4 letters or digits. Rule 46(b) caps a tax invoice
+# number at 16 characters and `pipeline.fy_ref()` drops the prefix rather than
+# exceed it, so "AB/TI/26-27/0001" (two letters) is the longest that keeps it.
+_SHORT_RE = re.compile(r"^[A-Z0-9]{1,4}$")
+
+
+def _v_name(v):   return "" if _NAME_RE.match(v)  else "Company name must be 1–60 characters on one line."
+def _v_short(v):  return "" if _SHORT_RE.match(v) else "Document prefix must be 1–4 letters or digits, e.g. AB."
+
+
+IDENTITY_FIELDS = [
+    ("COMPANY_NAME",      "Company Name",       "e.g. ACME PROJECTS",                 _v_name),
+    ("COMPANY_LEGAL",     "Legal Name",         "e.g. Acme Projects Pvt Ltd",         None),
+    ("COMPANY_TAGLINE",   "Tagline",            "e.g. Civil & MEP Contractors",       None),
+    ("COMPANY_ADDR",      "Registered Address", "Unit 1, …, City - 400001",           None),
+    ("COMPANY_PHONE",     "Phone",              "e.g. 98765 43210",                   _v_phone),
+    ("COMPANY_EMAIL",     "E-mail",             "e.g. info@example.com",              _v_email),
+    ("COMPANY_WEB",       "Website",            "e.g. www.example.com",               None),
+    ("COMPANY_GSTIN",     "GSTIN",              "27AAACA1234A1Z5",                    _v_gstin),
+    ("COMPANY_PAN",       "PAN",                "AAACA1234A",                         _v_pan),
+    ("COMPANY_BRANCHES",  "Branches",           "e.g. City A · City B",               None),
+    ("COMPANY_SIGNATORY", "Authorised Signatory", "Authorised Signatory",             None),
+]
+
+BANK_FIELDS = [
+    ("BANK_NAME",         "Bank",         "e.g. Example Bank Ltd.",     None),
+    ("BANK_ACCOUNT_NAME", "Account Name", "e.g. Acme Projects Pvt Ltd", None),
+    ("BANK_ACCOUNT_NO",   "Account No.",  "9–18 digits",                _v_acct),
+    ("BANK_IFSC",         "IFSC",         "e.g. ABCD0001234",           _v_ifsc),
+    ("BANK_BRANCH",       "Branch",       "e.g. Main Branch, City",     None),
+]
+
+# The statutory fields: what a printed document needs, what the completeness
+# meter counts and what the nav's amber dot waits on.
+ALL_FIELDS = IDENTITY_FIELDS + BANK_FIELDS
+
+# Stored and applied exactly like the fields above, but blank is a VALID
+# configuration — so they never count toward completeness or light the dot.
+NUMBERING_FIELDS = [
+    ("COMPANY_SHORT",     "Document Prefix", "e.g. AB",                     _v_short),
+]
+
+STORED_FIELDS = ALL_FIELDS + NUMBERING_FIELDS
+
+# Fields stored upper-cased, because that is how they are issued and how every
+# downstream system expects to match them.
+_UPPER = {"COMPANY_GSTIN", "COMPANY_PAN", "BANK_IFSC", "COMPANY_SHORT"}
+
+
+# =============================================================================
+# SEED — genuine defaults only
+# =============================================================================
+#
+# ⚠ **NO COMPANY IDENTITY IS SEEDED HERE.** A fresh install prints amber
+#   "add …" chips until somebody fills this page in, and that is the intended
+#   first-run state: a wrong-but-plausible identity is worse than a visibly
+#   missing one. The demo company lives in `demo_seed.py` — the one seed module
+#   — and arrives only when `tools/seed_demo.py` is run against an empty
+#   database.
+
+def ensure_default_settings() -> None:
+    """
+    Seed the charge heads — a GENUINE default, never demo data. A no-op after
+    the first call.
+
+    `/charge/new` renders a dropdown from them and an empty list is an unusable
+    page, so they are seeded on every install. Called from
+    `app._boot_persistence()` **after** `db.load_into()`, so a list somebody has
+    already edited (and that was just loaded out of MySQL) is never touched.
+    Guarded by `STORE["_settings_seeded"]`, which is deliberately not persisted.
+    """
+    if STORE.get("_settings_seeded"):
+        return
+    if CHARGE_HEADS_RECORD not in STORE["settings"]:
+        STORE["settings"][CHARGE_HEADS_RECORD] = {"heads": list(DEFAULT_CHARGE_HEADS)}
+    STORE["_settings_seeded"] = True
+
+
+# =============================================================================
+# THE LOGO — its own record, written by logo.py, read by branding.apply_logo()
+# =============================================================================
+LOGO_RECORD = "logo"
+
+
+def load_logo() -> dict:
+    """The stored logo record, or {} for "no logo" (the text letterhead)."""
+    return STORE["settings"].get(LOGO_RECORD) or {}
+
+
+def save_logo(rec: dict) -> None:
+    """Store a logo record from `logo.encode()`, or clear it with `{}`."""
+    if rec:
+        STORE["settings"][LOGO_RECORD] = rec
+    else:
+        STORE["settings"].pop(LOGO_RECORD, None)
+    B.apply_logo(load_logo())
+
+
+# =============================================================================
+# ACCESS — the username domain a renamed login must carry
+# =============================================================================
+#
+# `auth.py` reads this record directly out of STORE (auth may not import this
+# module). BLANK MEANS NO GATE: any well-formed username may be given. Set it
+# to the company's e-mail domain and a login may only be RENAMED to an address
+# ending in it — existing logins are grandfathered and never asked (auth.py,
+# "RENAMING A LOGIN").
+ACCESS_RECORD = "access"
+_DOMAIN_RE = re.compile(r"^@[a-z0-9-]+(\.[a-z0-9-]+)+$")
+
+
+def username_domain() -> str:
+    """The configured domain, normalised to `@example.com`, or "" for none."""
+    saved = STORE["settings"].get(ACCESS_RECORD) or {}
+    return str(saved.get("username_domain") or "").strip().lower()
+
+
+def _validate_access(form) -> tuple:
+    """`({"username_domain": …}, error)` — "@" added if the operator left it off."""
+    raw = str(form.get("username_domain") or "").strip().lower()
+    if raw and not raw.startswith("@"):
+        raw = "@" + raw
+    data = {"username_domain": raw}
+    if raw and not _DOMAIN_RE.match(raw):
+        return data, ("Username domain: that does not look like a domain, "
+                      "e.g. @example.com.")
+    return data, ""
+
+
+def save_access(data: dict) -> None:
+    dom = str((data or {}).get("username_domain") or "").strip()
+    if dom:
+        STORE["settings"][ACCESS_RECORD] = {"username_domain": dom}
+    else:
+        STORE["settings"].pop(ACCESS_RECORD, None)
+
+
+# =============================================================================
+# THE PUBLIC LANDING PAGE — content, not code
+# =============================================================================
+#
+# `landing.py` renders the public page from this record plus the identity
+# above. Every field is optional: a blank section is left off the page rather
+# than printed empty, so a fresh install shows a short, honest page carrying
+# only the company's name and contact details.
+#
+# The list fields are one item per line, parts separated by `|`:
+#   services / reasons   Title | one sentence
+#   reviews              Name | rating out of 5 | the quote
+LANDING_RECORD = "landing"
+
+LANDING_FIELDS = [
+    # (key, label, placeholder, rows)  rows 0 = a one-line input
+    ("eyebrow",      "Eyebrow line",       "e.g. Contractors since 2010",              0),
+    ("hero_title",   "Headline",           "e.g. Projects delivered on time.",         0),
+    ("hero_text",    "Headline paragraph", "One or two sentences under the headline.", 2),
+    ("about",        "About us",           "A paragraph per line.",                    4),
+    ("founder",      "Founder",            "e.g. A. N. Other",                         0),
+    ("service_area", "Service area",       "e.g. City A, City B and City C",           0),
+    ("hours",        "Working hours",      "e.g. Monday to Saturday, 9 am to 7 pm",    0),
+    ("services",     "Services",           "Title | one sentence — one per line",      5),
+    ("reasons",      "Why choose us",      "Title | one sentence — one per line",      5),
+    ("reviews",      "Client reviews",     "Name | rating out of 5 | quote — one per line", 4),
+]
+_LANDING_KEYS = [k for k, *_ in LANDING_FIELDS]
+_LANDING_MAX = 4000   # characters per field — a page, not a document
+
+
+def landing_content() -> dict:
+    """Every landing field, "" where unset."""
+    saved = STORE["settings"].get(LANDING_RECORD) or {}
+    return {k: str(saved.get(k) or "") for k in _LANDING_KEYS}
+
+
+def _validate_landing(form) -> tuple:
+    data = {k: str(form.get(f"landing_{k}") or "").replace("\r\n", "\n").strip()
+            for k in _LANDING_KEYS}
+    for key, label, _ph, _rows in LANDING_FIELDS:
+        if len(data[key]) > _LANDING_MAX:
+            return data, f"{label}: keep it under {_LANDING_MAX} characters."
+    for line in data["reviews"].split("\n"):
+        parts = [p.strip() for p in line.split("|")]
+        if line.strip() and len(parts) >= 2 and parts[1]:
+            try:
+                r = float(parts[1])
+            except ValueError:
+                return data, f"Client reviews: the rating in {line.strip()!r} is not a number."
+            if not 0 <= r <= 5:
+                return data, f"Client reviews: a rating is out of 5, not {parts[1]}."
+    return data, ""
+
+
+def save_landing(data: dict) -> None:
+    keep = {k: v for k, v in (data or {}).items() if k in _LANDING_KEYS and v}
+    if keep:
+        STORE["settings"][LANDING_RECORD] = keep
+    else:
+        STORE["settings"].pop(LANDING_RECORD, None)
+
+
+def load_saved() -> dict:
+    """The stored overrides. Also the hook app.py calls at boot."""
+    return STORE["settings"].get(RECORD_ID) or {}
+
+
+# =============================================================================
+# THE DRAFT PO SERIES — its own record, and NOT a branding override
+# =============================================================================
+#
+# A **separate record** in the same collection, because these two are not
+# company identity: they do not print in a letterhead, `apply_settings()` must
+# not push them onto `branding`, and above all they must not be counted by the
+# nav's amber dot. That dot means "a statutory detail is missing and a document
+# will print a chip"; a draft-PO prefix is neither.
+#
+# ⚠ **The counter is GLOBAL and deliberately not per-BOQ. That is the opposite
+#   of `ra_no`.** A contractor keeps ONE running purchase-order series across
+#   all suppliers and all sites (DOMAIN.md §5.2), so the next number depends on
+#   every draft PO ever raised and on nothing about the schedule it came from.
+#   `ra_no` is per project by design, because it is the project's own RA
+#   sequence. Getting these two the same way round is the difference between
+#   the paper books matching the application and not.
+#
+# It is also **not** financial-year scoped. Every other series in this app is
+# (`AB/TI/26-27/0001`), and this one is not, because one running series is
+# what a paper purchase-order book is, and an FY reset would restart it every
+# April.
+PO_SERIES_RECORD = "po_draft_series"
+
+PO_SERIES_DEFAULTS = {
+    # Both are strings: they are form fields, and `next_no` is parsed where it
+    # is used. The prefix default is DERIVED — see po_series_defaults().
+    "prefix":  "DPO",
+    "next_no": "1",
+}
+
+
+def po_series_defaults() -> dict:
+    """
+    The defaults with the prefix following the company's document prefix —
+    `AB/DPO` once one is set at /settings, the bare `DPO` until then — so a
+    company that never opens the draft-PO box still gets its own prefix.
+    """
+    short = str(B.COMPANY_SHORT or "").strip()
+    return {**PO_SERIES_DEFAULTS,
+            "prefix": f"{short}/DPO" if short else PO_SERIES_DEFAULTS["prefix"]}
+
+
+def po_series() -> dict:
+    """The draft-PO prefix and next number, defaults filled in."""
+    saved = STORE["settings"].get(PO_SERIES_RECORD) or {}
+    return {k: (str(saved.get(k) or "").strip() or v)
+            for k, v in po_series_defaults().items()}
+
+
+def save_po_series(prefix: str, next_no) -> None:
+    """
+    Write the series back. Only non-default values are stored, exactly as the
+    company overrides are, so a later change to the defaults still reaches
+    anyone who never edited them.
+    """
+    values = {"prefix": str(prefix or "").strip(),
+              "next_no": str(next_no or "").strip()}
+    defaults = po_series_defaults()
+    keep = {k: v for k, v in values.items()
+            if v and v != defaults[k]}
+    if keep:
+        STORE["settings"][PO_SERIES_RECORD] = keep
+    else:
+        STORE["settings"].pop(PO_SERIES_RECORD, None)
+
+
+# =============================================================================
+# THE DELIVERY CHALLAN SERIES — its own record, for the draft PO's reasons
+# =============================================================================
+#
+# A **third record** in the same collection, and it is here rather than on
+# `branding` for exactly the reason the draft-PO series is: it does not print
+# in a letterhead, `apply_settings()` must not push it onto `branding`, and it
+# must not be counted by the nav's amber dot. That dot means "a statutory
+# detail is missing and a document will print a chip"; a challan prefix is not
+# one, and a blank prefix here is the *normal* configuration rather than a gap.
+#
+# ⚠ **The prefix defaults to BLANK, because a paper challan book is numbered
+#   that way.** Challan 54 is the bare integer `54` — one paper series across
+#   every supplier and every site, with no prefix at all. So a blank prefix
+#   prints the number on its own and unpadded, which is what continues the book;
+#   set a prefix and the series takes the padded `PREFIX/0055` shape every
+#   other series in this app uses. `challan.next_ref()` owns that rule.
+#
+# ⚠ **GLOBAL, and deliberately not per-BOQ. That is the opposite of `ra_no`**,
+#   which is per project because it is that job's own RA sequence. One running
+#   series across all sites is what the paper does.
+DC_SERIES_RECORD = "delivery_challan_series"
+
+DC_SERIES_DEFAULTS = {
+    # Blank, because a paper book has no prefix. Both are strings: they are
+    # form fields, and `next_no` is parsed where it is used.
+    "prefix":  "",
+    "next_no": "1",
+}
+
+
+def dc_series() -> dict:
+    """The delivery-challan prefix and next number, defaults filled in."""
+    saved = STORE["settings"].get(DC_SERIES_RECORD) or {}
+    return {k: (str(saved.get(k) or "").strip() or v)
+            for k, v in DC_SERIES_DEFAULTS.items()}
+
+
+def dc_ref_of(series: dict) -> str:
+    """
+    The challan number a series is currently pointing at.
+
+    **The shape lives here, with the record**, rather than in `challan.py`:
+    `/settings` has to show the operator what the next number will look like
+    while they are typing it, and `settings.py` may not import `challan.py`
+    (nothing downstream of `quotation.py` may import back). Two copies of a
+    padding rule is how a preview starts disagreeing with the document.
+
+    Blank prefix -> the bare integer, unpadded: `54`. That is how a paper
+    challan book runs, and the reason the prefix defaults to blank.
+    Prefix set   -> `PREFIX/0054`, the padded shape every other series uses.
+    """
+    prefix = str(series.get("prefix") or "").strip()
+    n = int(series.get("next_no") or 1)
+    return f"{prefix}/{n:04d}" if prefix else str(n)
+
+
+def _dc_ref_preview(series: dict) -> str:
+    """`dc_ref_of()` over a half-typed form, which may hold a blank number."""
+    return dc_ref_of({"prefix": series.get("prefix", ""),
+                      "next_no": series.get("next_no") or 1})
+
+
+def save_dc_series(prefix: str, next_no) -> None:
+    """Write the series back. Only non-default values are stored."""
+    values = {"prefix": str(prefix or "").strip(),
+              "next_no": str(next_no or "").strip()}
+    keep = {k: v for k, v in values.items()
+            if v and v != DC_SERIES_DEFAULTS[k]}
+    if keep:
+        STORE["settings"][DC_SERIES_RECORD] = keep
+    else:
+        STORE["settings"].pop(DC_SERIES_RECORD, None)
+
+
+def _validate_dc_series(form) -> tuple:
+    """Returns (data, error), and **always returns data**."""
+    data = {"prefix":  (form.get("dc_prefix") or "").strip(),
+            "next_no": (form.get("dc_next_no") or "").strip()}
+    if data["prefix"] and len(data["prefix"]) > 32:
+        return data, "Delivery challan prefix: keep it under 32 characters."
+    raw = data["next_no"]
+    if raw:
+        if not raw.isdigit():
+            return data, "Delivery challan next number: digits only."
+        if int(raw) < 1:
+            return data, "Delivery challan next number: must be 1 or more."
+    return data, ""
+
+
+def _validate_po_series(form) -> tuple:
+    """
+    Returns (data, error), and **always returns data** — `address._validate()`'s
+    contract, which every form in this app holds to.
+    """
+    data = {"prefix":  (form.get("po_prefix") or "").strip(),
+            "next_no": (form.get("po_next_no") or "").strip()}
+    if data["prefix"] and len(data["prefix"]) > 32:
+        return data, "Draft PO prefix: keep it under 32 characters."
+    raw = data["next_no"]
+    if raw:
+        if not raw.isdigit():
+            return data, "Draft PO next number: digits only."
+        if int(raw) < 1:
+            return data, "Draft PO next number: must be 1 or more."
+    return data, ""
+
+
+# =============================================================================
+# THE DOCUMENT-NUMBER FLOORS — CC-free go-live hardening, 25 September 2026
+# =============================================================================
+#
+# ABOUT.md §7 gap 36. A **fifth record** in this collection, here for the
+# draft-PO series' reasons and one sharper one of its own: it does not print in
+# a letterhead, `apply_settings()` must not push it onto `branding`, and the
+# nav's amber completeness dot must not count it. That dot means "a statutory
+# detail is missing and a document will print a chip"; **a blank floor is the
+# NORMAL configuration** and counting it would light the dot on every install
+# that never touched this section.
+#
+# ⚠ **THE RECORD AND ITS RULE LIVE IN `series.py`, NOT HERE**, and that is the
+#   one structural difference from the draft-PO and challan series above.
+#   `boq.py` MAY NOT IMPORT `settings.py` — `tests/test_import_directions.py`
+#   refuses the arrow — and neither may `charge.py`, `docsheet.py`,
+#   `boqpick.py`, `employee.py`, `project.py` or `chrome.py`. A floor reachable
+#   from some minters and not from others is not a floor. So the leaf owns the
+#   rule and this page owns the form, exactly as `challan.py` owns the document
+#   and this page owns its series — the same split, the other way round.
+#
+# ⚠ **A FLOOR IS NOT A NEXT-NUMBER.** The draft PO and the challan above store
+#   a *counter* that advances on every save and spends a number even when the
+#   document is deleted. These store a *lower bound*: `next = max(existing max
+#   in the scope + 1, floor)`. The difference is what makes one safe to set on
+#   a live box — a floor below where a series has already reached does nothing
+#   at all — and it is why the two kinds are not merged into one control.
+#
+# ⚠ **An FY-reset series' floor is stored WITH the financial year**, so a floor
+#   set for 26-27 is inert in 27-28 and the April reset to 0001 under Rule
+#   46(b) still happens. That is the question gap 36 said had to be answered by
+#   the client's numbering policy before this was worth building, and the
+#   thirty-first §0 block is the answer.
+
+def _sample_of(s) -> str:
+    """
+    What one number in series `s` looks like with THIS company's prefix —
+    `series.py` holds the prefix-less shape (it may import nothing but
+    `store`), and the prefix is a /settings field, so it is joined here.
+    """
+    sample = str(s.sample or "")
+    short = str(B.COMPANY_SHORT or "").strip()
+    if short and "/" in sample:
+        return f"{short}/{sample}"
+    return sample
+
+
+def _today_fy() -> str:
+    """The financial year a floor set today applies to."""
+    return P.fy_of(_date.today().isoformat())
+
+
+def series_floor_rows() -> list:
+    """
+    `[(series, scope, floor, current_max, next_ref_preview)]` — what the form
+    draws, and what its validator checks against. One place, so the preview
+    and the refusal cannot disagree.
+    """
+    fy = _today_fy()
+    rows = []
+    for s in SER.SERIES:
+        scope = s.scope_for(fy)
+        rows.append((s, scope, SER.floor_of(s.key, scope),
+                     SER.current_max(s.key, fy), SER.next_seq(s.key, fy)))
+    return rows
+
+
+def _validate_series_floors(form) -> tuple:
+    """
+    `(data, error)` — and **always returns data**, `address._validate()`'s
+    contract, which every form in this app holds to.
+
+    ⚠ **A FLOOR AT OR BELOW THE CURRENT MAX IS REFUSED, AND THE MAX IS NAMED.**
+      `series.next_seq()` would simply ignore such a floor — `max()` cannot
+      pull a series backwards — so accepting it would store a number that does
+      nothing, on a page whose entire purpose is to make a series start where
+      the operator says. A control that silently has no effect is worse than
+      one that says why. **A floor only ever moves a series forward.**
+
+    ⚠ Digits only, and 1 or more, exactly as `_validate_po_series()` and
+      `_validate_dc_series()` require. Blank is always legal and means
+      "no floor" — which is today's behaviour, byte-identical.
+    """
+    fy = _today_fy()
+    data = {}
+    error = ""
+    for s in SER.SERIES:
+        raw = (form.get(f"floor_{s.key}") or "").strip()
+        data[s.key] = raw
+        if not raw or error:
+            continue
+        if not raw.isdigit():
+            error = f"{s.label} starting number: digits only."
+            continue
+        n = int(raw)
+        if n < 1:
+            error = f"{s.label} starting number: must be 1 or more."
+            continue
+        highest = SER.current_max(s.key, fy)
+        if n <= highest:
+            error = (f"{s.label} starting number: {n} is at or below the "
+                     f"highest number already issued, which is {highest}. "
+                     f"A starting number can only move a series forward — "
+                     f"use {highest + 1} or more, or leave it blank.")
+    return data, error
+
+
+def save_series_floors(data: dict) -> None:
+    """Write every floor back, under the scope each series is currently in."""
+    fy = _today_fy()
+    for s in SER.SERIES:
+        SER.save_floor(s.key, s.scope_for(fy), data.get(s.key, ""))
+
+
+# =============================================================================
+# CHARGE HEADS — employee/misc expenses
+# =============================================================================
+# =============================================================================
+# THE LABOUR-COST SETTINGS — CC-2 **C5**, and the OT multiplier is the point
+# =============================================================================
+#
+# A **fourth record** in the same collection, here for the draft-PO series'
+# reasons: it does not print in a letterhead, `apply_settings()` must not push
+# it onto `branding`, and the nav's amber completeness dot must not count it.
+#
+# ⚠ **THE OT MULTIPLIER IS A SETTING BECAUSE HARDCODING IT WOULD MAKE THIS
+#   SOFTWARE COMPUTE A STATUTORY UNDERPAYMENT, and that is CC-2's own reasoning
+#   rather than our caution.** The specification is `salary ÷ 8 × hours`, which
+#   is **1× ordinary rate**. Statutory overtime under the Factories Act and
+#   most state Shops & Establishments Acts is generally **twice** ordinary
+#   wages. So the specified 1× is the DEFAULT and the field is editable, and
+#   `attendance.py` reads it — **no literal multiplier appears anywhere in the
+#   calculation code**, which `tests/test_attendance.py` asserts at AST level
+#   rather than by reading the source for a number.
+#
+# ⚠ **`wage_days_per_month` USED TO LIVE HERE AND IS DELETED — 30 August 2026.**
+#   It was a divisor **we** invented to turn a monthly salary into a daily wage,
+#   defaulted to 26, on the reading that CC-2's `salary` was a monthly figure.
+#   That reading was corrected: site labour is paid **daily or weekly**, and
+#   CC-2 had always agreed — its own note calls `salary ÷ 8 × hours` **"1×
+#   ordinary rate"**, which is true only if `salary ÷ 8` is an HOURLY rate, so
+#   `salary` is a **day's** wage. The employee master carries a **day rate**
+#   now, there is nothing to divide, and the setting is **retired rather than
+#   re-tuned** — including its row in PROGRESS.md §4c, where a beyond-CC-2 item
+#   is removed rather than added.
+#
+#   ⚠ **Do not reintroduce it.** A divisor here would mean somebody had gone
+#   back to storing a monthly figure, which is the defect this deletion closes.
+#   `tests/test_day_rate_pin.py` fails if the name reappears in this file, in
+#   `attendance.py` or on this page.
+#
+#   ⚠ A **stale stored value survives on an old database** — the record is
+#   `{"wage_days_per_month": "1"}`, which once made a screen read *"1 working
+#   days a month"* and made a day's wage the whole monthly salary. `labour_settings()` cannot see a key that is not in
+#   `LABOUR_DEFAULTS`, so it is inert — and `tools/backfill_day_rate.py` strips
+#   it anyway, because a dead key in a live settings row is a trap for the next
+#   reader.
+LABOUR_RECORD = "labour_cost"
+
+LABOUR_DEFAULTS = {
+    # The specified 1×. A string, because it is a form field and is
+    # parsed where it is used — `po_series()`'s convention.
+    "ot_multiplier": "1",
+}
+
+
+def labour_settings() -> dict:
+    """
+    The OT multiplier, default filled in.
+
+    ⚠ Keyed off `LABOUR_DEFAULTS`, so a key the app no longer knows — a stored
+    `wage_days_per_month` on a database that predates 30 August 2026 — is not
+    read and cannot reach any calculation.
+    """
+    saved = STORE["settings"].get(LABOUR_RECORD) or {}
+    return {k: (str(saved.get(k) or "").strip() or v)
+            for k, v in LABOUR_DEFAULTS.items()}
+
+
+def ot_multiplier() -> float:
+    """
+    The OT multiplier as a number, for `attendance.py`.
+
+    ⚠ **The one accessor.** A second parse of the same field somewhere else is
+    a second place the default gets written down, and the default is precisely
+    the thing that must never be a constant in the calculation.
+    """
+    raw = labour_settings()["ot_multiplier"]
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(LABOUR_DEFAULTS["ot_multiplier"])
+
+
+def save_labour_settings(multiplier) -> None:
+    """
+    Only non-default values are stored — `save_po_series()`'s contract.
+
+    ⚠ It writes the record **whole**, so saving `/settings` is also what drops a
+    stale `wage_days_per_month` off a database that predates 30 August 2026.
+    `tools/backfill_day_rate.py` does not rely on somebody visiting the page.
+    """
+    values = {"ot_multiplier": str(multiplier or "").strip()}
+    keep = {k: v for k, v in values.items()
+            if v and v != LABOUR_DEFAULTS[k]}
+    if keep:
+        STORE["settings"][LABOUR_RECORD] = keep
+    else:
+        STORE["settings"].pop(LABOUR_RECORD, None)
+
+
+def _validate_labour(form) -> tuple:
+    """Returns (data, error), and **always returns data**."""
+    data = {"ot_multiplier": (form.get("ot_multiplier") or "").strip()}
+
+    raw = data["ot_multiplier"]
+    if raw:
+        try:
+            mult = float(raw)
+        except ValueError:
+            return data, "Overtime multiplier: enter a number, e.g. 1 or 2."
+        if mult < 0:
+            return data, "Overtime multiplier: cannot be negative."
+        if mult > 10:
+            return data, ("Overtime multiplier: 10x is not an overtime rate, "
+                          "it is a typo.")
+
+    return data, ""
+
+
+CHARGE_HEADS_RECORD = "charge_heads"
+
+DEFAULT_CHARGE_HEADS = [
+    "Travel", "Food & Meals", "Wages / Labour", "Consumables",
+    "Tools & Equipment", "Transport / Freight", "Accommodation",
+    "Site Expenses", "Other"
+]
+
+def charge_heads() -> list:
+    """The list of charge heads available."""
+    saved = STORE["settings"].get(CHARGE_HEADS_RECORD, {})
+    return saved.get("heads", DEFAULT_CHARGE_HEADS)
+
+def save_charge_heads(heads_list: list) -> None:
+    STORE["settings"][CHARGE_HEADS_RECORD] = {"heads": heads_list}
+
+# =============================================================================
+# THE JOINT MEASUREMENT SHEET'S COLUMNS — data, not code
+# =============================================================================
+#
+# ⚠ **A NEW KIND OF WORK MUST NOT NEED A CODE CHANGE.** Every trade measures
+#   in its own columns — sizes, lengths, areas, counts. The eight below are a
+#   trade-neutral starting set, seeded here and editable at `/settings` — the
+#   same shape, the same record collection and the same textarea idiom the
+#   charge heads use, because that precedent already proves the pattern in this
+#   codebase.
+#
+# ⚠ **EVERY COLUMN CARRIES A UNIT, and the unit prints in the head.** Their
+#   paper sheet can total a metres column and a kilograms column into one TOTAL
+#   row without saying so. A TOTAL row that adds metres to kilograms is a lie the
+#   sheet tells quietly; naming the unit is what stops it.
+#
+# ⚠ **The column set is SNAPSHOTTED onto each sheet at create** —
+#   `measurement.grid_columns_of()`. Editing this list must never restate a
+#   sheet somebody has already signed. That is the RA bill's own claim-row
+#   invariant, and it has already shipped as a defect once in this repo.
+#
+# The wire format is one column per line, `key|label|group|unit`. An empty
+# group means the column's head spans both rows of the table head; a group is
+# what draws `COUNT` above its four sub-columns.
+#
+# ⚠ **Eight, not fewer, on purpose.** `measurement.grid_col_widths()` gives
+#   LOCATION a fixed share and divides the rest equally between the numeric
+#   columns; below eight a numeric column would come out WIDER than LOCATION on
+#   portrait paper (and below seven on landscape), against the sheet's own
+#   layout contract (`tests/test_measurement_layout.py`).
+MEASUREMENT_COLUMNS_RECORD = "measurement_columns"
+
+DEFAULT_MEASUREMENT_COLUMNS = [
+    {"key": "len",      "label": "LENGTH",   "group": "",      "unit": "m"},
+    {"key": "area",     "label": "AREA",     "group": "",      "unit": "sqm"},
+    {"key": "vol",      "label": "VOLUME",   "group": "",      "unit": "cum"},
+    {"key": "wt",       "label": "WEIGHT",   "group": "",      "unit": "kg"},
+    {"key": "points",   "label": "POINTS",   "group": "COUNT", "unit": "Nos"},
+    {"key": "supplied", "label": "SUPPLIED", "group": "COUNT", "unit": "Nos"},
+    {"key": "fixed",    "label": "FIXED",    "group": "COUNT", "unit": "Nos"},
+    {"key": "tested",   "label": "TESTED",   "group": "COUNT", "unit": "Nos"},
+]
+
+
+def measurement_columns() -> list:
+    """The numeric columns a new joint measurement sheet is created with."""
+    saved = STORE["settings"].get(MEASUREMENT_COLUMNS_RECORD, {})
+    cols = saved.get("columns")
+    return cols if cols else [dict(c) for c in DEFAULT_MEASUREMENT_COLUMNS]
+
+
+def save_measurement_columns(cols: list) -> None:
+    STORE["settings"][MEASUREMENT_COLUMNS_RECORD] = {"columns": cols}
+
+
+def measurement_columns_text(cols: list = None) -> str:
+    """The column list as the textarea shows it, `key|label|group|unit`."""
+    return "\n".join(
+        f"{c.get('key','')}|{c.get('label','')}|{c.get('group','')}|{c.get('unit','')}"
+        for c in (cols if cols is not None else measurement_columns()))
+
+
+def _validate_measurement_columns(raw: str) -> tuple:
+    """
+    `(columns, error)` — parsed, de-duplicated by key, order preserved.
+
+    A blank box restores the seeded defaults rather than leaving a sheet with no
+    numeric columns at all, which is `_validate_charge_heads()`'s rule one
+    field over and is the same judgement: an empty list is far more likely to
+    be a cleared box than a deliberate choice to have no columns.
+    """
+    if not raw.strip():
+        return [dict(c) for c in DEFAULT_MEASUREMENT_COLUMNS], ""
+
+    out, seen = [], set()
+    for n, line in enumerate(raw.split("\n"), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        bits = [b.strip() for b in line.split("|")]
+        key = bits[0] if bits else ""
+        if not key:
+            return [], f"Line {n}: every column needs a key."
+        if not key.replace("_", "").isalnum():
+            return [], (f"Line {n}: the key {key!r} must be letters, digits or "
+                        f"underscores &mdash; it names a form field.")
+        if key in seen:
+            return [], f"Line {n}: the column key {key!r} is used twice."
+        seen.add(key)
+        out.append({
+            "key":   key[:32],
+            "label": (bits[1] if len(bits) > 1 else key)[:32] or key,
+            "group": (bits[2] if len(bits) > 2 else "")[:32],
+            "unit":  (bits[3] if len(bits) > 3 else "")[:16],
+        })
+    if not out:
+        return [dict(c) for c in DEFAULT_MEASUREMENT_COLUMNS], ""
+    return out, ""
+
+
+def _validate_charge_heads(raw: str) -> tuple:
+    """Returns (heads_list, error)"""
+    if not raw.strip():
+        return DEFAULT_CHARGE_HEADS, ""
+        
+    lines = [line.strip() for line in raw.split("\n") if line.strip()]
+    deduped = []
+    seen = set()
+    for line in lines:
+        if line not in seen:
+            deduped.append(line)
+            seen.add(line)
+    if not deduped:
+        return DEFAULT_CHARGE_HEADS, ""
+    return deduped, ""
+
+
+def _validate(form) -> tuple:
+    """
+    Returns (data, error). **Always returns data**, so a rejected form
+    re-renders with the user's input intact rather than throwing it away —
+    the same contract as address._validate().
+
+    Blank is always allowed: every one of these is optional, and clearing a
+    field is how you go back to the branding.py default.
+    """
+    data, error = {}, ""
+    for key, label, _ph, check in STORED_FIELDS:
+        raw = (form.get(key) or "").strip()
+        if key in _UPPER:
+            raw = raw.upper()
+        data[key] = raw
+        if raw and check and not error:
+            problem = check(raw)
+            if problem:
+                error = f"{label}: {problem}"
+    return data, error
+
+
+def _completeness(values: dict) -> tuple:
+    """(filled, total) across the fields a document actually needs filled."""
+    needed = [k for k, _l, _p, _c in ALL_FIELDS]
+    filled = sum(1 for k in needed if (values.get(k) or "").strip())
+    return filled, len(needed)
+
+
+# =============================================================================
+# CSS
+# =============================================================================
+# Reuses QUOTATION_STYLES for the form furniture (.form-section, .section-title,
+# .fg2, .form-group, .alert) rather than re-declaring it. PRODUCT_STYLES, which
+# address.py leans on, has the inputs but not the sectioned layout.
+# Only the completeness meter and the blank-field marker are new.
+
+SETTINGS_STYLES = """
+<style>
+  .set-intro {
+    background:var(--surface); border:1px solid var(--border);
+    border-left:3px solid var(--brand); border-radius:var(--radius);
+    padding:1rem 1.2rem; margin-bottom:1.4rem; font-size:.88rem; line-height:1.6;
+  }
+  .set-intro b { color:var(--brand); }
+
+  .set-meter { margin-top:.7rem; }
+  .set-track {
+    height:7px; background:var(--border); border-radius:99px; overflow:hidden;
+  }
+  .set-fill { height:100%; background:var(--brand); border-radius:99px; }
+  .set-fill.done { background:#0CA30C; }
+  .set-count {
+    font-size:.78rem; color:var(--muted); margin-top:.35rem; font-weight:600;
+  }
+
+  /* A field left blank is not an error — it is a document that will print an
+     amber chip. Say so next to the input rather than after the fact. */
+  .fld-blank {
+    font-size:.72rem; color:#8A5A00; font-weight:600; margin-top:.15rem;
+  }
+  .fld-hint { font-size:.72rem; color:var(--muted); margin-top:.15rem; }
+
+  .set-actions {
+    display:flex; gap:.75rem; align-items:center; flex-wrap:wrap;
+    margin-top:1.4rem;
+  }
+  .set-actions .spacer { flex:1; }
+  .set-note { font-size:.8rem; color:var(--muted); }
+
+  .logo-now { min-height:56px; display:flex; align-items:center; }
+  .logo-rm  { display:flex; gap:.4rem; align-items:center; font-size:.8rem;
+              color:var(--muted); margin-top:.5rem; text-transform:none; }
+</style>
+"""
+
+
+# =============================================================================
+# RENDERING — why this view does not call render_template_string()
+# =============================================================================
+#
+# The page is a fully interpolated HTML string by the time the view returns it.
+# Nothing is passed as Jinja context — ABOUT.md §1 says so explicitly — so
+# handing the finished string back to Jinja parses it a second time for no
+# benefit and one large cost: any `{{ … }}` or `{% … %}` that reached the output
+# from USER INPUT is then executed as a template.
+#
+# That is not theoretical, and it is worst here. `pipeline.esc()` escapes
+# `< > & " '` and deliberately not braces, so a company address saved with
+# `{{ config }}` in it renders the Flask config — including SECRET_KEY — and
+# `{% for x in y %}` raises a TemplateSyntaxError. These fields are pushed onto
+# `branding` by `apply_settings()` and print in the LETTERHEAD, so one bad save
+# used to reach every document and every page in the app at once, and the page
+# needed to correct it was one of the ones that had stopped rendering.
+#
+# Returning the string directly is what Flask does with any `str` a view
+# returns. It removes the second parse, and with it the injection. HTML
+# escaping still does its own job — this changes nothing about XSS.
+#
+# ⚠ Still open in `quotation.py` and `product.py`, and this one-liner does not
+#   reach either: quotation.py builds its pages with `.format()` and has
+#   attribute, <script> and option-text sinks besides; product.py does not
+#   escape at all. Each wants its own pass — ABOUT.md §7.9d.
+# =============================================================================
+
+def _page(html: str) -> str:
+    """A finished page. See the note above — deliberately not Jinja-rendered."""
+    return html
+
+
+# =============================================================================
+# ROUTES
+# =============================================================================
+
+@settings_bp.route("/", methods=["GET", "POST"])
+def edit_settings():
+    error, notice = "", ""
+
+    if request.method == "POST":
+        data, error = _validate(request.form)
+        po_data, po_error = _validate_po_series(request.form)
+        dc_data, dc_error = _validate_dc_series(request.form)
+        ch_data, ch_error = _validate_charge_heads(request.form.get("charge_heads", ""))
+        mc_data, mc_error = _validate_measurement_columns(
+            request.form.get("measurement_columns", ""))
+        lb_data, lb_error = _validate_labour(request.form)
+        sf_data, sf_error = _validate_series_floors(request.form)
+        ac_data, ac_error = _validate_access(request.form)
+        ld_data, ld_error = _validate_landing(request.form)
+        # The logo: a new upload replaces it, the remove box clears it, and a
+        # form posted with neither leaves it exactly as it is.
+        logo_rec, logo_error = None, ""
+        upload = request.files.get("logo_file")
+        if upload is not None and (upload.filename or "").strip():
+            import auth
+            import logo as LG
+            enc, logo_error = LG.encode(upload)
+            if enc:
+                logo_rec = LG.stamp(enc, (auth.current_user() or {}).get("id", ""))
+        elif request.form.get("logo_remove"):
+            logo_rec = {}
+        error = (error or po_error or dc_error or ch_error or lb_error
+                 or mc_error or sf_error or ac_error or ld_error or logo_error)
+        if not error:
+            # The draft-PO prefix box is pre-filled with the EFFECTIVE value,
+            # so posting it back unchanged after the document prefix moved
+            # would pin the OLD derived default as an override. Read it as
+            # "still the default" when it equals the default it was shown as.
+            shown_default = po_series_defaults()["prefix"]
+            # Store only what differs from the default, so a later change to
+            # branding.py still reaches anyone who never overrode that field.
+            overrides = {k: v for k, v in data.items()
+                         if v and v != B.DEFAULTS.get(k, "")}
+            if overrides:
+                STORE["settings"][RECORD_ID] = overrides
+            else:
+                STORE["settings"].pop(RECORD_ID, None)
+            B.apply_settings(overrides)
+
+            po_prefix = po_data["prefix"]
+            if po_prefix == shown_default:
+                po_prefix = ""
+            save_po_series(po_prefix, po_data["next_no"])
+            save_dc_series(dc_data["prefix"], dc_data["next_no"])
+            save_series_floors(sf_data)
+            save_charge_heads(ch_data)
+            save_measurement_columns(mc_data)
+            save_labour_settings(lb_data["ot_multiplier"])
+            save_access(ac_data)
+            save_landing(ld_data)
+            if logo_rec is not None:
+                save_logo(logo_rec)
+            return redirect(url_for("settings.edit_settings",
+                                    msg="Company details saved.", type="success"))
+        values = data
+        po_values = po_data
+        dc_values = dc_data
+        ch_values = "\n".join(ch_data)
+        mc_values = (measurement_columns_text(mc_data) if mc_data
+                     else request.form.get("measurement_columns", ""))
+        lb_values = lb_data
+        # What the operator typed, kept in the boxes — address._validate()'s
+        # contract. `series_floor_rows()` is re-read either way, because the
+        # max and the preview beside each box are facts about the store, not
+        # about the form.
+        sf_values = sf_data
+        ac_values = ac_data
+        ld_values = ld_data
+    else:
+        values = {**B.current_settings(), **B.current_optional()}
+        po_values = po_series()
+        dc_values = dc_series()
+        ch_values = "\n".join(charge_heads())
+        mc_values = measurement_columns_text()
+        lb_values = labour_settings()
+        sf_values = {s.key: (str(f) if f else "")
+                     for s, _sc, f, _mx, _nx in series_floor_rows()}
+        ac_values = {"username_domain": username_domain()}
+        ld_values = landing_content()
+
+    msg      = request.args.get("msg")
+    msg_type = request.args.get("type", "success")
+    alert_html = ""
+    if error:
+        alert_html = f'<div class="alert alert-error">&#10007; {P.esc(error)}</div>'
+    elif msg:
+        icon = "&#10003;" if msg_type == "success" else "&#10007;"
+        alert_html = f'<div class="alert alert-{P.esc(msg_type)}">{icon} {P.esc(msg)}</div>'
+
+    def _fields_html(fields) -> str:
+        out = ""
+        optional = {k for k, *_ in NUMBERING_FIELDS}
+        for key, label, placeholder, _check in fields:
+            val   = values.get(key, "")
+            if key in optional:
+                blank = ('<div class="fld-hint">Optional &mdash; blank prints '
+                         'numbers with no prefix, e.g. TI/26-27/0001.</div>'
+                         if not str(val).strip() else "")
+            else:
+                blank = "" if str(val).strip() else (
+                    '<div class="fld-blank">blank — prints as an amber chip</div>')
+            # The address is the only multi-line field; everything else is one
+            # line and a textarea would just invite stray newlines into a
+            # letterhead that has no room for them.
+            if key == "COMPANY_ADDR":
+                ctl = (f'<textarea id="{key}" name="{key}" rows="2" '
+                       f'placeholder="{P.esc(placeholder)}">{P.esc(val)}</textarea>')
+                cls = "form-group span2"
+            else:
+                ctl = (f'<input type="text" id="{key}" name="{key}" '
+                       f'value="{P.esc(val)}" placeholder="{P.esc(placeholder)}"/>')
+                cls = "form-group"
+            out += (f'<div class="{cls}"><label for="{key}">{label}</label>'
+                    f'{ctl}{blank}</div>')
+        return out
+
+    def _floor_rows_html() -> str:
+        """
+        One box per series, with the two facts an operator needs beside it:
+        the highest number already issued, and what the next document will
+        actually be called if they save this.
+        """
+        out = ""
+        for s, scope, _floor, highest, nxt in series_floor_rows():
+            typed = sf_values.get(s.key, "")
+            issued = (f"highest issued: <b>{highest:04d}</b>" if highest
+                      else "nothing issued yet")
+            span = ("financial year <b>" + P.esc(scope) + "</b>"
+                    if s.fy_scoped else "<b>one running series</b>")
+            out += (
+                f'<div class="form-group">'
+                f'<label for="floor_{s.key}">{P.esc(s.label)}</label>'
+                f'<input type="text" id="floor_{s.key}" name="floor_{s.key}" '
+                f'inputmode="numeric" value="{P.esc(typed)}" '
+                f'placeholder="leave blank to carry on from {nxt:04d}"/>'
+                f'<div class="fld-hint">{P.esc(_sample_of(s))} &middot; {span} '
+                f'&middot; {issued}<br/>{P.esc(s.note)}</div>'
+                f'</div>')
+        return out
+
+    def _landing_fields_html() -> str:
+        """One box per landing-page field; the long ones are textareas."""
+        out = ""
+        for key, label, placeholder, rows in LANDING_FIELDS:
+            name = f"landing_{key}"
+            val = ld_values.get(key, "")
+            if rows:
+                ctl = (f'<textarea id="{name}" name="{name}" rows="{rows}" '
+                       f'placeholder="{P.esc(placeholder)}">{P.esc(val)}</textarea>')
+                cls = "form-group span2"
+            else:
+                ctl = (f'<input type="text" id="{name}" name="{name}" '
+                       f'value="{P.esc(val)}" placeholder="{P.esc(placeholder)}"/>')
+                cls = "form-group"
+            out += f'<div class="{cls}"><label for="{name}">{label}</label>{ctl}</div>'
+        return out
+
+    filled, total = _completeness(values)
+    pct  = int(round(filled / total * 100)) if total else 0
+    done = " done" if filled == total else ""
+
+    dash_url = url_for("dashboard.index")
+
+    template = f"""<!DOCTYPE html><html lang="en">
+    <head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+    <title>{B.page_title("Company Settings")}</title>{B.HEAD_ICON}
+    {BASE_STYLES}{QUOTATION_STYLES}{SETTINGS_STYLES}</head>
+    <body>{_nav()}
+    <main>
+      <div class="page-top">
+        <h1>Company <span>Settings</span></h1>
+        <div style="display:flex;gap:.7rem;">
+          <a href="{dash_url}" class="btn btn-ghost">&#8592; Dashboard</a>
+        </div>
+      </div>
+
+      {alert_html}
+
+      <div class="set-intro">
+        These are the details that print on every <b>quotation</b>,
+        <b>proforma invoice</b> and <b>tax invoice</b> — the letterhead, the
+        GSTIN/PAN line, and the bank account a customer pays into. The GSTIN
+        does double duty: its first two digits are the State we supply from,
+        which is how a tax invoice knows whether a supply attracts IGST or
+        CGST&nbsp;+&nbsp;SGST. Anything left blank prints as a
+        visible amber <span class="todo-chip">add …</span> marker rather than
+        going out silently empty.
+        <div class="set-meter">
+          <div class="set-track"><div class="set-fill{done}" style="width:{pct}%;"></div></div>
+          <div class="set-count">{filled} of {total} filled in</div>
+        </div>
+      </div>
+
+      <form method="POST" action="{url_for("settings.edit_settings")}"
+            enctype="multipart/form-data">
+
+        <div class="form-section">
+          <div class="section-title">Company Identity</div>
+          <div class="fg2">{_fields_html(IDENTITY_FIELDS)}</div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Logo</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            Prints on the letterhead of every document and sits in the top bar.
+            <b>Optional</b> &mdash; with no logo, every page and every printed
+            document carries the company name in text instead. PNG, JPEG or
+            WebP, up to 5&nbsp;MB; it is re-encoded and stored as a small PNG.
+          </p>
+          <div class="fg2">
+            <div class="form-group">
+              <label>Current logo</label>
+              <div class="logo-now">{B.logo_img(56, doc=True) or '<span class="fld-hint">No logo &mdash; the name prints in text.</span>'}</div>
+            </div>
+            <div class="form-group">
+              <label for="logo_file">Upload a new logo</label>
+              <input type="file" id="logo_file" name="logo_file"
+                     accept="image/png,image/jpeg,image/webp"/>
+              {('<label class="logo-rm"><input type="checkbox" name="logo_remove" value="1"/> '
+                'Remove the current logo</label>') if B.has_logo() else ''}
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Document Numbering</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            The short code every document number starts with &mdash;
+            <b>AB</b>/TI/26-27/0001. Set it once, before the first document.
+            Changing it later changes how NEW numbers print; numbering itself
+            carries on from the highest number already issued.
+          </p>
+          <div class="fg2">{_fields_html(NUMBERING_FIELDS)}</div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Bank Details &mdash; proforma invoice &amp; RA bill</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            These print on the proforma invoice and printed RA tax invoice, which request payment.
+            They are deliberately kept off the quotation — that is an offer, not
+            a demand for money.
+          </p>
+          <div class="fg2">{_fields_html(BANK_FIELDS)}</div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Draft Purchase Order Series</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            <b>One running series across all suppliers and all sites</b>, so it
+            can continue the numbers already kept on paper. Set the next number
+            to whatever comes after the last one in the book. It is
+            deliberately <b>not</b> reset each financial year and is
+            deliberately <b>not</b> per project &mdash; unlike the RA bill
+            number, which is that project's own sequence. A deleted draft PO
+            does not release its number.
+          </p>
+          <div class="fg2">
+            <div class="form-group">
+              <label for="po_prefix">Prefix</label>
+              <input type="text" id="po_prefix" name="po_prefix"
+                     value="{P.esc(po_values.get('prefix', ''))}"
+                     placeholder="{P.esc(po_series_defaults()['prefix'])}"/>
+              <div class="fld-hint">Prints as
+                {P.esc(po_values.get('prefix') or po_series_defaults()['prefix'])}/{int(po_values.get('next_no') or 1):04d}</div>
+            </div>
+            <div class="form-group">
+              <label for="po_next_no">Next number</label>
+              <input type="text" id="po_next_no" name="po_next_no"
+                     inputmode="numeric"
+                     value="{P.esc(po_values.get('next_no', ''))}"
+                     placeholder="{P.esc(PO_SERIES_DEFAULTS['next_no'])}"/>
+              <div class="fld-hint">Advances on every draft PO raised.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Delivery Challan Series</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            <b>One running series across all sites</b>, like the draft PO and
+            unlike the RA bill number. The prefix is <b>blank by default</b>,
+            because the challan book it continues numbers in bare integers
+            &mdash; challan <b>54</b>, not <b>DC/0054</b>. Set the next
+            number to whatever comes after the last one written in the book.
+            A deleted challan does not release its number.
+          </p>
+          <div class="fg2">
+            <div class="form-group">
+              <label for="dc_prefix">Prefix <span style="font-weight:500;text-transform:none;">(optional)</span></label>
+              <input type="text" id="dc_prefix" name="dc_prefix"
+                     value="{P.esc(dc_values.get('prefix', ''))}"
+                     placeholder="leave blank for a bare number"/>
+              <div class="fld-hint">Prints as {P.esc(_dc_ref_preview(dc_values))}</div>
+            </div>
+            <div class="form-group">
+              <label for="dc_next_no">Next number</label>
+              <input type="text" id="dc_next_no" name="dc_next_no"
+                     inputmode="numeric"
+                     value="{P.esc(dc_values.get('next_no', ''))}"
+                     placeholder="{P.esc(DC_SERIES_DEFAULTS['next_no'])}"/>
+              <div class="fld-hint">Advances on every challan raised.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Labour Cost &mdash; the overtime multiplier</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            Read by <b>Attendance</b> when it works out what a day on site
+            cost. ⚠ <b>It is a setting and not a fixed number on purpose.</b>
+            The default below is <b>1&times;</b>,
+            from <i>day rate &divide; 8 &times; hours</i>. Statutory overtime
+            under the Factories Act and most state Shops &amp; Establishments
+            Acts is generally <b>twice</b> ordinary wages, so leaving it at 1
+            may understate what is owed. This software does not decide that; it
+            computes what is set here. Nothing already recorded is rewritten
+            &mdash; changing it changes what the attendance pages show from now
+            on.
+          </p>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            ⚠ <b>&ldquo;Working days a month&rdquo; used to sit beside this box
+            and is gone (30 August 2026).</b> It divided a monthly salary into a
+            daily wage. Wages here are <b>daily</b> &mdash; the employee master
+            carries a <b>day rate</b> &mdash; so there is nothing left to
+            divide. Every employee record that existed before that date is
+            marked as needing its rate re-entered, and no wage is computed from
+            one until it is.
+          </p>
+          <div class="fg2">
+            <div class="form-group">
+              <label for="ot_multiplier">Overtime multiplier</label>
+              <input type="text" id="ot_multiplier" name="ot_multiplier"
+                     inputmode="decimal"
+                     value="{P.esc(lb_values.get('ot_multiplier', ''))}"
+                     placeholder="{P.esc(LABOUR_DEFAULTS['ot_multiplier'])}"/>
+              <div class="fld-hint">1 = the default. 2 = the usual
+                statutory rate. Applied to the hourly rate, never to the day.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Starting Numbers &mdash; every other series</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            <b>Set these once, at go-live, so a series continues the book the
+            office already keeps</b> instead of restarting at 0001 beside it.
+            Leave a box blank and nothing changes &mdash; that is the normal
+            setting, and every box below starts blank.
+            <br/><br/>
+            &#9888; <b>A starting number is a floor, not a counter.</b> The next
+            document takes whichever is higher: one more than the highest number
+            already issued, or the number set here. So it can only ever move a
+            series <b>forward</b> &mdash; a number at or below what has already
+            gone out is refused, and the box says what the highest is.
+            <br/><br/>
+            &#9888; <b>The ones marked with a financial year apply to that year
+            only.</b> Each of them restarts at 0001 every April, which for a tax
+            invoice is Rule 46(b) rather than a preference, so a number set for
+            one year is deliberately ignored in the next. That is what makes it
+            impossible for a starting number to repeat a serial across years.
+            <br/><br/>
+            &#9888; <b>The quotation series is not here</b> and has no starting
+            number. A quotation is an offer rather than a tax document, so
+            nothing statutory depends on its number.
+          </p>
+          <div class="fg2">{_floor_rows_html()}</div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Charge Heads</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            List of categories for employee and miscellaneous charges, one per line.
+          </p>
+          <div class="form-group">
+            <label for="charge_heads">Charge Heads (one per line)</label>
+            <textarea id="charge_heads" name="charge_heads" rows="6">{P.esc(ch_values)}</textarea>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Joint Measurement Sheet &mdash; columns</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            The numeric columns on the joint measurement sheet, one per line as
+            <code>key|label|group|unit</code>. The <b>group</b> draws a spanning
+            head above its columns (that is what makes <code>COUNT</code>
+            sit over <code>SUPPLIED</code> and <code>FIXED</code>); leave it
+            empty for a column whose head spans both rows. The <b>unit</b>
+            prints in the head, so a TOTAL row cannot silently add metres to
+            kilograms.
+            <br/>
+            <b>Changing this list does not restate a sheet that already
+            exists</b> &mdash; every sheet keeps the columns it was created
+            with.
+          </p>
+          <div class="form-group">
+            <label for="measurement_columns">Columns (key|label|group|unit)</label>
+            <textarea id="measurement_columns" name="measurement_columns"
+                      rows="13">{P.esc(mc_values)}</textarea>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Sign-in Names</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            The e-mail domain a login may be <b>renamed</b> to, e.g.
+            <code>@example.com</code>. Leave it blank for no restriction.
+            Existing logins keep working exactly as they are; the rule only
+            binds what a name is changed to.
+          </p>
+          <div class="fg2">
+            <div class="form-group">
+              <label for="username_domain">Username domain <span style="font-weight:500;text-transform:none;">(optional)</span></label>
+              <input type="text" id="username_domain" name="username_domain"
+                     value="{P.esc(ac_values.get('username_domain', ''))}"
+                     placeholder="e.g. @example.com"/>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Public Landing Page</div>
+          <p class="fld-hint" style="margin:-.5rem 0 1rem;">
+            The public page at <a href="{url_for('landing.index')}">{P.esc(url_for('landing.index'))}</a>,
+            built from the identity above and the text below. Every box is
+            optional &mdash; a blank section is left off the page. List boxes
+            take one item per line, parts separated by <code>|</code>.
+          </p>
+          <div class="fg2">{_landing_fields_html()}</div>
+        </div>
+
+        <div class="set-actions">
+          <button type="submit" class="btn">Save Details</button>
+          <a href="{dash_url}" class="btn btn-ghost">Cancel</a>
+          <span class="spacer"></span>
+          <span class="set-note">Clearing a field restores its built-in default.</span>
+        </div>
+      </form>
+
+      <footer><p>{B.name_text()} · {B.APP_SUBTITLE} · company settings</p></footer>
+    </main></body></html>"""
+    return _page(template)

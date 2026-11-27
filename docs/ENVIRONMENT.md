@@ -1,0 +1,285 @@
+# Environment variables — the complete list
+
+> **This is the one list.** Every environment variable the application reads,
+> what it defaults to, and which ones are mandatory in production.
+>
+> It is maintained by hand, and
+> `tests/test_deployment_config.py::test_env_example_names_every_variable_the_app_reads`
+> is what stops it drifting: that test reads the **AST** of every root module for
+> `os.getenv(...)` calls and fails if a name appears in the code and not in
+> [`.env.example`](../.env.example). Add a variable to the code, and you add it
+> to `.env.example` and to this file in the same commit.
+>
+> ⚠ **Nothing secret belongs in a tracked file.** `.env.example` is tracked;
+> `.env`, `secret_key.txt` and `backups/` are gitignored. Every value in
+> `.env.example` is blank or a safe local-dev default, and a test asserts it.
+
+**Measured on 9 September 2026**, against a brand new empty MySQL schema — the
+first time this application had ever been started against one.
+
+---
+
+## How configuration is read
+
+`db.py` calls `load_dotenv(override=False)` **once, at import**. Two
+consequences, and both have bitten:
+
+- **A real environment variable wins over `.env`.** That is what lets
+  `tests/conftest.py` force `DB_ENABLED=false` before importing `app`, and what
+  lets a deployment set values without editing a file.
+
+  ⚠ **The TEST SUITE does not read `.env` at all** (25 September 2026).
+  `tests/conftest.py::_never_read_dotenv()` replaces `dotenv.load_dotenv`
+  before `db` is imported, and pins the local-dev session-cookie values as real
+  environment variables. Running the suite on the production box used to pick
+  up that box's `.env` and fail — **2 failures, measured** — which made the one
+  check an operator performs after a deploy useless exactly where it is most
+  wanted. The subprocess tests in `tests/test_wsgi_single_worker.py` carry
+  their own copy of the same values, because a child imports `db.py` fresh and
+  calls the loader for itself where nothing in the parent can reach it.
+
+  ⚠ **Nothing about the running application changed.** `.env` reaches
+  `python app.py` and `gunicorn` exactly as it always has.
+  `tests/test_env_isolation.py::test_db_still_reads_dotenv_for_the_real_application`
+  reads `db.py`'s AST and fails if that call stops being an unconditional
+  module-level `load_dotenv(override=False)`.
+- **`db.CONFIG` is built at import time.** Changing `DB_*` after `import db` has
+  no effect. `attachment.root()` and `auth.session_cookie_config()` deliberately
+  do the opposite and re-read on every call — see the note on `ATTACHMENT_DIR`.
+
+---
+
+## 1. Database — `db.py`
+
+| Variable | Default | Production | What it does |
+|---|---|---|---|
+| `DB_ENABLED` | `true` | **must be `true`** | `false` runs entirely in RAM and loses everything on restart. The suite sets it false; a server must not. |
+| `DB_STRICT` | `false` | **should be `true`** | `true` refuses to start when MySQL is unreachable. At `false` the app starts anyway, prints a banner and runs in memory — which on a real server means taking work all day and saving none of it. |
+| `DB_HOST` | `127.0.0.1` | set it | |
+| `DB_PORT` | `3306` | set it | |
+| `DB_NAME` | `<db_name>` | set it | `db.init()` issues `CREATE DATABASE IF NOT EXISTS`, so **the schema does not have to exist** — the app creates its own, and all 22 tables with it. |
+| `DB_USER` | `root` | **set it** | `root` is a local-dev convenience, not a deployment answer. |
+| `DB_PASSWORD` | `""` (empty) | **mandatory** | ⚠ Never in a tracked file. |
+
+**There is no migration step.** `db.init()` creates the schema and every table at
+boot (`CREATE TABLE IF NOT EXISTS` for all 22 collections), so pointing a fresh
+app at an empty MySQL is the whole of the database install.
+
+---
+
+## 2. Signing key — `auth.py`
+
+| Variable | Default | Production | What it does |
+|---|---|---|---|
+| `QMS_SECRET_KEY` | — | **mandatory** | Signs the session cookie. Checked **first**. |
+| `SECRET_KEY` | — | alternative | Checked **second**. Honoured because `tests/conftest.py` has set it since before `auth.py` existed, and a live install may already carry it. Read, never written. |
+
+When neither is set, `auth.resolve_secret_key()` reads `secret_key.txt` beside
+the code, mints a random 256-bit key if that is absent, and **prints a loud
+banner to stderr** saying so (`auth.secret_key_warning()`). It warns; it does not
+refuse to start — ABOUT.md §7 and PROGRESS.md row 32 have the reasoning.
+
+⚠ **A key supplied through either variable raises no warning at all**, because
+from inside the process a published placeholder is indistinguishable from a real
+key. That is why `.env.example` now ships `SECRET_KEY=` **blank**: it used to
+ship `SECRET_KEY=qms-demo-secret-2024`, the exact literal
+`tests/test_auth.py::test_the_demo_secret_key_is_gone_from_the_codebase` scans
+every root module to keep *out* of the code — and ABOUT.md's own cold-start block
+says `cp .env.example .env`, so following the documentation handed it back.
+Generate a real one:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+⚠ **If `secret_key.txt` is lost or differs between restarts, every session
+cookie is invalidated** and everybody is signed out. That is a logout, not a
+data loss — but on a deployment, set the variable and do not rely on the file.
+
+---
+
+## 3. Attachment store — `attachment.py`
+
+| Variable | Default | Production | What it does |
+|---|---|---|---|
+| `ATTACHMENT_DIR` | `<repo>/attachments` | **set it, outside the checkout** | Where CC-2 B8's uploaded files live. The database row holds only a **relative path**. |
+
+⚠ **Re-read on every call, never cached in a module constant.** The tests point
+it at a temporary directory per test, and a value read once at import would make
+the first test's directory the one every later test wrote into.
+
+⚠ **A backup of this application is two files, not one.** A `mysqldump` covers
+the attachment *metadata* and not the files. `tools/backup_db.py` writes both
+halves under one stamp — see [`docs/COLD_START.md`](COLD_START.md) and
+ABOUT.md §4. Put this directory **outside** the checkout so a redeploy cannot
+delete the client's uploads.
+
+---
+
+## 4. Bind address — `app.py` (the development server only)
+
+| Variable | Default | Production | What it does |
+|---|---|---|---|
+| `QMS_HOST` | `127.0.0.1` | **not used** | Checked first. |
+| `HOST` | `127.0.0.1` | **not used** | Checked second, for a host that already sets it. |
+| `QMS_PORT` | `5000` | **not used** | Checked first. A value that is not a number in 1–65535 falls back to 5000 with a named warning, never a traceback. |
+| `PORT` | `5000` | **not used** | Checked second. |
+
+⚠ **These affect `python app.py` and nothing else.** A production server takes
+its own bind argument (`gunicorn --bind`), and these four are not consulted.
+
+⚠ **The default host is `127.0.0.1` and that is deliberate.** `app.py` runs
+`app.run(debug=True, ...)`, which serves Werkzeug's interactive debugger — a
+remote shell. Defaulting the dev server to `0.0.0.0` would publish it on the LAN.
+Use `wsgi.py` in production.
+
+---
+
+## 5. Session cookie — `auth.install()`
+
+| Variable | Default | Production | What it does |
+|---|---|---|---|
+| `SESSION_COOKIE_SECURE` | `false` | ⚠ **MANDATORY `true`** | At `false` the cookie `auth.enforce()` trusts is sent over plain HTTP. |
+| `SESSION_COOKIE_HTTPONLY` | `true` | keep `true` | Stops JavaScript reading the cookie. |
+| `SESSION_COOKIE_SAMESITE` | `Lax` | keep `Lax` | `Lax`, `Strict` or `None`, case-insensitive. Flask's own default leaves the flag **unset**; this app is single-origin, so `Lax` costs nothing. `None` is only legal alongside `Secure`. |
+
+⚠ **The defaults are the LOCAL-DEV values, not the production ones.** `Secure`
+defaults to `false` because a browser never sends a Secure cookie over
+`http://127.0.0.1` — it silently drops it, nobody can sign in, and nothing says
+why. A default that breaks `python app.py` is a default that gets deleted,
+taking the production value with it. `wsgi.py` prints a warning at every boot
+while `Secure` is off.
+
+**A value that does not parse is reported and the default is used.** The app
+still boots — a deployment with a typo must be *told*, not prevented from
+starting — but `SESSION_COOKIE_SECURE=ture` never resolves to `True` by
+truthiness. That is the one misconfiguration on this page with no symptom at
+all, and `tests/test_deployment_config.py` exists mostly for it.
+
+---
+
+## 6. Demo data — `auth.py`
+
+| Variable | Default | Production | What it does |
+|---|---|---|---|
+| `QMS_DEMO_DATA` | **`false`** | ⚠ **`false`** | `true` seeds 12 demo products, 6 demo addresses, a 97-line demo BOQ and a **specimen company identity** on a fresh database. None of it is the client's. |
+
+⚠ **This is the one flag on this page whose default is the PRODUCTION value,
+not the local-dev one**, and the asymmetry is deliberate. Everywhere else a
+default that breaks `python app.py` is a default that gets deleted; here the
+failure that matters is a client box nobody remembered to configure, and the
+safe side of that failure is the side that grows no data. `.env.example` ships
+`true` because that is the dev file; a production `.env` sets `false` or simply
+omits the line.
+
+**What it gates, and what it does not.** Four seeders are DEMO and are gated:
+
+| Seeded | Where | Gated |
+|---|---|---|
+| 12 demo products | `product.ensure_demo_products()` | ✅ — disarmed from `app.disarm_frozen_demo_seeder()`, because `product.py` is frozen |
+| 6 demo addresses — **real company names, invented GSTINs** | `address.ensure_demo_addresses()` | ✅ |
+| 1 demo BOQ — 97 lines, ₹91.9 lakh, **another company's name** | `boq.ensure_demo_boq()` | ✅ |
+| specimen company identity — template GSTIN/PAN, `SPECIMEN BANK LTD.` | `settings.ensure_demo_settings()` | ✅ |
+
+Three are **genuine defaults** and are seeded whatever this says, because a page
+needs them to render:
+
+| Seeded | Where | Why it is not gated |
+|---|---|---|
+| the 56-clause spec library | `spec.ensure_demo_specs()` | the BOQ picker is written from it, and since 12 September 2026 so is the quotation picker |
+| the 9 charge heads | `settings.ensure_demo_settings()` | `/charge/new` renders a dropdown from them |
+| the 12 measurement grid columns | `settings.DEFAULT_MEASUREMENT_COLUMNS` | a module constant with a settings override, not a seeded row |
+
+⚠ **It stops seeding. It deletes nothing.** A database that has already booted
+once with the demo on still holds those records. Turning the flag off stops
+them coming back after the operator removes them — which is the half of
+ABOUT.md §7 gap 35 that made deleting them pointless.
+
+⚠ **Read on every call, never cached in a module constant**, for
+`ATTACHMENT_DIR`'s reason. `auth.demo_data_on()` is the one reader every seeder
+uses; `auth.demo_data_config()` is the side-effect-free `(on, problems)` form.
+A value that does not parse is reported to stderr **once** and the default is
+used — `QMS_DEMO_DATA=ture` never resolves to `True` by truthiness, which
+matters more here than anywhere else on this page: it would put another
+company's priced schedule on a client's server and say nothing.
+
+---
+
+## 7. Single-worker guard — `wsgi.py`
+
+| Variable | Default | Production | What it does |
+|---|---|---|---|
+| `QMS_ALLOW_MULTIPROCESS` | unset | ⚠ **never set it** | Turns the single-worker refusal off. Warns loudly every boot. It exists so the refusal can be tested. |
+| `QMS_LOCK_FILE` | `<tmp>/qms-<host>-<port>-<schema>.lock` | leave unset | Where the lock lives. Keyed by the database so two deployments on one box do not report each other as a rogue worker. |
+
+⚠ **`--workers 1` is a correctness requirement, not a tuning choice.**
+`store.STORE` is one dict in one process's RAM. Two workers is two divergent
+copies of the whole application state overwriting each other **with no error at
+all**. `wsgi.py` refuses to start rather than allow it. Scale with `--threads`,
+which share one STORE.
+
+---
+
+## 7b. GSTIN auto-fill — `gst_lookup.py` (29 September 2026)
+
+| Variable | Default | Production | What it does |
+|---|---|---|---|
+| `GST_API_KEY` | unset | **optional** | The gstinapi.in key for the FALLBACK — asked only when the GST portal itself times out, errors or answers in an unexpected shape. Unset, a portal failure says *"Auto-fill unavailable, enter manually."* and nothing else is called. |
+
+⚠ **Unset is a complete configuration.** The primary path is the GST portal
+with a CAPTCHA the user types, and it needs no key. Manual entry always works.
+
+⚠ **Every lookup through it is a paid call** (gstinapi.in: one credit per
+success). A browser cannot ask for it directly: the server calls it only after
+it saw the portal fail itself (ABOUT.md §5 `/address`).
+
+⚠ **The adapter is unproven against a live key** — none was available when it
+was built. See `docs/GST_PORTAL.md` before relying on it.
+
+⚠ **Re-read on every call**, `ATTACHMENT_DIR`'s arrangement, so a test can set
+it with `monkeypatch`; `tests/conftest.py` removes it for every test.
+
+⚠ **Whether the production box can reach `services.gst.gov.in` at all is
+UNPROVEN** — the flow was proven from an Indian residential IP only. The check
+is one line, run on the server: `docs/GST_PORTAL.md` §6.
+
+---
+
+## 8. Tooling — not read by the application
+
+| Variable | Read by | What it does |
+|---|---|---|
+| `QMS_SEED_PASSWORD` | `tools/seed_users.py` | The first Owner's password, as an alternative to `--password`. **No default, ever**, and placeholders are refused. |
+| `QMS_NEW_PASSWORD` | `tools/set_password.py` | Same, for resetting an existing account. That tool **cannot create** one. |
+| `QMS_E2E_USER_*` / `QMS_E2E_PASS_*` | `tools/e2e_chain.py` | Credentials for the end-to-end driver. |
+
+---
+
+## A minimum production environment
+
+Everything marked mandatory above, and nothing else:
+
+```bash
+DB_ENABLED=true
+DB_STRICT=true
+DB_HOST=...
+DB_PORT=3306
+DB_NAME=...
+DB_USER=...
+DB_PASSWORD=...              # never in a tracked file
+QMS_SECRET_KEY=...     # python -c "import secrets; print(secrets.token_hex(32))"
+ATTACHMENT_DIR=/var/lib/<app>/attachments    # outside the checkout
+SESSION_COOKIE_SECURE=true
+SESSION_COOKIE_HTTPONLY=true
+SESSION_COOKIE_SAMESITE=Lax
+QMS_DEMO_DATA=false    # the code already defaults to this — set it anyway
+```
+
+Then:
+
+```bash
+gunicorn --workers 1 --threads 4 --bind 0.0.0.0:8000 wsgi:application
+```
+
+[`docs/COLD_START.md`](COLD_START.md) is the sequence that takes an empty
+database to a working, logged-in application, and records what was actually run.

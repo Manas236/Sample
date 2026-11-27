@@ -1,0 +1,428 @@
+"""
+The signed-in user chip — and the golden coupling it had to be built around.
+
+Until 27 August 2026 this application had **no way to sign out from the
+interface**. `/logout` existed and worked; nothing linked to it. The chip in
+`chrome._user_chip()` is that link, plus who you are and a way to `/account`.
+
+### Why it is not simply four lines in `_nav()`
+
+Five print goldens hash the **whole response bytes** of pages that render
+`_nav()`, so any nav change moves them — the long-standing coupling recorded in
+ABOUT.md §7 as "Global Nav vs Print Goldens". Measured for this pass rather than
+assumed: replacing `_nav()` with a sentinel moved **five** of the eleven golden
+assertions (tax invoice, proforma, purchase order, RA bill, BOQ line picker) and
+left the delivery challan alone, because `challan.print_dc` renders no nav at
+all.
+
+So the chip carries its own style constant, emitted in the body beside itself,
+and `BASE_STYLES` — the block those goldens hash — is untouched. The remaining
+problem is the chip's own *markup*, which is bytes wherever it appears, so it is
+suppressed on exactly the endpoints a golden pins. `PINNED_PAGES` is that set,
+and the first test below is what stops it drifting away from the goldens it
+claims to track.
+
+**This file does not assert the goldens are unmoved** — `tests/test_print_golden.py`
+does that, unchanged, and it is the real evidence. This file asserts the chip is
+where it should be, absent where it must be, and escaped.
+
+✅ **14 September 2026 — the coupling above is closed and the suppression is
+gone.** No print route renders `_nav()` any more, so the chip cannot reach a
+printed document; the one pinned FORM, `/po/create`, carries the chip like every
+other screen page and its golden moved for it in the sidebar commit. The chip
+rides in the top bar of `chrome._nav()`'s shell now. `PINNED_PAGES` is kept as
+the one statement of which endpoints a golden hashes, and the first test below
+still holds it to the golden file; nothing in the application reads it.
+"""
+
+import ast
+import pathlib
+
+import pytest
+
+import auth
+import chrome
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+
+# The freeze baseline for `product.py` and `quotation.py`. Re-anchored from
+# `eff0034` in October 2026: `910b3a6` is the white-label commit at which both
+# files reached their product state (see the docstring of the freeze test).
+FREEZE_BASE = "910b3a6"
+
+
+# ── The tie between PINNED_PAGES and the goldens ───────────────────────────
+
+def _urls_the_goldens_request() -> set:
+    """
+    Every URL `tests/test_print_golden.py` hands to `client.get`, read from its
+    **AST** rather than by importing it.
+
+    Importing would run its fixtures; a text search would match the URLs in its
+    prose. The AST sees exactly the calls, including the f-strings, whose
+    interpolations are replaced by a placeholder id — every rule involved takes
+    a single opaque `<id>`, so the placeholder matches the same rule the real
+    id would.
+    """
+    source = (REPO / "tests" / "test_print_golden.py").read_text(encoding="utf8")
+    urls = set()
+
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "client"
+                and node.args):
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            urls.add(arg.value)
+        elif isinstance(arg, ast.JoinedStr):
+            built = ""
+            for part in arg.values:
+                if isinstance(part, ast.Constant):
+                    built += str(part.value)
+                else:
+                    built += "golden-placeholder-id"
+            urls.add(built)
+    return urls
+
+
+def test_the_suppression_set_is_exactly_what_the_goldens_pin():
+    """
+    `PINNED_PAGES` is hand-written, and this is the only reason that is allowed.
+
+    A second list of routes is exactly the drift Part C's navigation filtering
+    refuses to accept, so this one is checked against the thing it describes:
+    the URLs the golden file actually requests, resolved to endpoints through
+    the live `url_map`. Add a golden and forget the endpoint, or delete a golden
+    and leave a stale entry, and this fails.
+    """
+    import app as app_module
+
+    adapter = app_module.app.url_map.bind("localhost")
+    hashed = set()
+    for url in _urls_the_goldens_request():
+        path = url.split("?", 1)[0]
+        endpoint, _ = adapter.match(path)
+        hashed.add(endpoint)
+
+    assert hashed, "no golden URLs were found — the AST walk has stopped working"
+    assert chrome.PINNED_PAGES == hashed, (
+        f"chrome.PINNED_PAGES and the print goldens disagree.\n"
+        f"  pinned but not hashed: {sorted(chrome.PINNED_PAGES - hashed)}\n"
+        f"  hashed but not pinned: {sorted(hashed - chrome.PINNED_PAGES)}\n"
+        f"An endpoint that is hashed and not pinned will have its golden moved "
+        f"by the next nav change; one that is pinned and not hashed is a page "
+        f"needlessly missing its sign-out control.")
+
+
+# ── The chip itself ────────────────────────────────────────────────────────
+
+def test_the_nav_carries_the_signed_in_users_name_account_and_a_way_out(client):
+    """All three things the chip exists to show, on an ordinary page."""
+    html = client.get("/").get_data(as_text=True)
+
+    assert '<div class="nav-user">' in html, "the chip is not on the dashboard"
+    assert "Test Owner" in html, "the chip does not name the signed-in user"
+    assert 'href="/account"' in html, "no link to /account"
+    assert 'href="/logout"' in html, "no way to sign out"
+
+
+@pytest.mark.parametrize("url", ["/", "/boq/", "/spec/", "/users", "/account",
+                                 "/settings/", "/projects/", "/receipt/"])
+def test_the_chip_is_on_every_ordinary_page_not_just_the_dashboard(client, url):
+    """
+    The point of putting it in `_nav()` rather than at call sites: a user who
+    has been inside `/boq/create` for an hour can still sign out. Includes
+    `/product/` and `/quotation/` by construction — neither file was touched.
+    """
+    html = client.get(url).get_data(as_text=True)
+    assert '<nav class="rail"' in html, f"{url} does not render the shared nav at all"
+    assert 'class="nav-user"' in html, f"{url} has a nav but no sign-out control"
+
+
+def test_the_frozen_modules_get_the_chip_without_being_edited(client):
+    """
+    `product.py` and `quotation.py` are frozen (INTRODUCTION.md §7). They carry
+    the chip because `_nav()` grew it, which is the whole argument for putting
+    it there instead of at 39 call sites.
+
+    ⚠ **REWRITTEN on 29 August 2026.** `quotation.py` was unfrozen NARROWLY
+    under the second override block of that date in `CLIENT_CHANGES.md` §0, for
+    one thing: the deal panel's Committed figure, which re-derived its own total
+    instead of calling `purchase.job_cost()`. The original assertion was, in
+    full and verbatim:
+
+        assert not changed.stdout.strip(), (
+            f"a frozen module was edited: {changed.stdout.strip()}. The chip is in "
+            f"_nav() precisely so these two never have to be.")
+
+    It is not weakened, and it is not deleted. `product.py` still has to be
+    untouched, on exactly the same terms. For `quotation.py` the claim is now
+    the one the override actually made: **every edited line falls inside
+    `view_quotation()`**. A narrow unfreeze that grows to fit the work is not a
+    narrow unfreeze, and this is what would catch it — an edit anywhere else in
+    that file fails here, including the escaping-sensitive formatters the freeze
+    was really protecting.
+
+    ⚠ **REWRITTEN AGAIN on 11 September 2026** under the twenty-seventh
+    override block in `CLIENT_CHANGES.md` §0, which unfreezes `quotation.py`
+    narrowly a second time, for exactly THREE more functions, so that a new
+    quotation is written from the specification library instead of the hidden
+    product catalogue: `_product_catalog_json()`, `_process_selections()` and
+    `create_quotation()`. `view_quotation()` keeps only its 29 August unfreeze.
+    The assertion this replaces was, in full and verbatim:
+
+        assert span[0] <= start and end <= span[1], (
+            f"quotation.py lines {start}-{end} were edited, outside "
+            f"view_quotation() ({span[0]}-{span[1]}). The 29 August 2026 "
+            f"unfreeze covers the deal panel's committed figure and its "
+            f"breakout row. Nothing else in that file is unfrozen.")
+
+    ⚠ **EXTENDED on 23 September 2026** under the THIRTIETH override block in
+    `CLIENT_CHANGES.md` §0, which unfreezes `quotation.py` narrowly a third
+    time for exactly ONE more function — `delete_quotation()`, the delete
+    route — plus the single line inside `view_quotation()` that draws its
+    button. `view_quotation()` was already unfrozen on 29 August and its span
+    is **not widened** by this; the new name is the whole of the change.
+
+    ⚠ **RE-ANCHORED in October 2026 (the white-label product).** The baseline
+    moved from `eff0034` to `FREEZE_BASE` — the commit at which the white-label
+    pass left both files: `product.py` lost one client's demo seeder (its
+    catalogue was that client's own), and `quotation.py` lost that client's
+    wording in its letterhead, terms and dropdowns. Every rule in this test is
+    unchanged and is measured from there.
+
+    The claim is now that every edited line since `FREEZE_BASE` falls inside ONE
+    of those five functions — `UNFROZEN_QUOTATION_FUNCTIONS` below is the
+    whole list, and a fifth name added to it without a §0 block naming it is
+    exactly what "an unfreeze that grows to fit the work" looks like.
+    `product.py` is STILL frozen with no exception at all, and the pass that
+    hid the catalogue did not touch it — `tests/test_product_hidden.py`
+    asserts the same thing from its own side.
+    """
+    import ast
+    import re
+    import subprocess
+
+    for url in ("/product/", "/quotation/"):
+        assert 'class="nav-user"' in client.get(url).get_data(as_text=True), (
+            f"{url} lost its sign-out control")
+
+    def _diff(*args):
+        try:
+            # ⚠ `encoding="utf8"`, not `text=True`: on Windows the latter decodes
+            #   with cp1252, and a diff carrying a `═` (byte 0x90, undefined
+            #   there) killed the reader thread and returned stdout=None —
+            #   which this test then read as a TypeError on 11 September 2026.
+            r = subprocess.run(["git", "diff", *args], cwd=REPO,
+                               capture_output=True, encoding="utf8",
+                               errors="replace", timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pytest.skip("git is not available here; the assertions above still hold")
+        if r.returncode != 0:
+            pytest.skip(f"this checkout does not reach {FREEZE_BASE} — the freeze's baseline")
+        return r.stdout
+
+    # `product.py` is frozen with no exception at all. Unchanged assertion.
+    assert not _diff("--name-only", FREEZE_BASE, "--", "product.py").strip(), (
+        "product.py is fully frozen and was edited. The chip is in _nav() "
+        "precisely so it never has to be.")
+
+    # `quotation.py` — two narrow unfreezes, held to four named functions.
+    UNFROZEN_QUOTATION_FUNCTIONS = {
+        "view_quotation",          # 29 Aug 2026 — the deal panel's committed figure
+                                   # 23 Sep 2026 — and the Delete button, one line
+        "_product_catalog_json",   # 11 Sep 2026 — the spec-library embed
+        "_process_selections",     # 11 Sep 2026 — a pick becomes a line
+        "create_quotation",        # 11 Sep 2026 — the picker and its POST
+        "delete_quotation",        # 23 Sep 2026 — the delete route (THIRD unfreeze)
+    }
+    src = (REPO / "quotation.py").read_text(encoding="utf8")
+    # ⚠ The span starts at the first DECORATOR, not at `def`. `ast` reports
+    #   `lineno` on the `def` line, which would leave a route's own
+    #   `@quotation_bp.route(...)` sitting outside the span of the function it
+    #   decorates — and a decorator is part of the function, not of the file
+    #   around it. Found on 23 September 2026 by `delete_quotation()`, the
+    #   first unfrozen function in this file to carry one.
+    spans = {n.name: (min([n.lineno] + [d.lineno for d in n.decorator_list]),
+                      n.end_lineno)
+             for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.FunctionDef) and n.name in UNFROZEN_QUOTATION_FUNCTIONS}
+    assert set(spans) == UNFROZEN_QUOTATION_FUNCTIONS, (
+        f"an unfrozen function is missing from quotation.py: "
+        f"{UNFROZEN_QUOTATION_FUNCTIONS - set(spans)} — renaming one is an edit "
+        f"outside every named span")
+
+    # ⚠ **PER-LINE since 23 September 2026, and that is STRICTER, not looser.**
+    # The check this replaces was, in full and verbatim:
+    #
+    #     end = start + count - 1
+    #     inside = any(lo <= start and end <= hi for lo, hi in spans.values())
+    #     assert inside, (
+    #         f"quotation.py lines {start}-{end} were edited, outside every "
+    #         f"unfrozen function {sorted(spans.items())}. ...")
+    #
+    # It required a whole hunk to sit inside ONE span. That is unsatisfiable
+    # for an edit that legitimately touches two adjacent unfrozen functions:
+    # appending `delete_quotation()` after `view_quotation()` produces a single
+    # hunk running from the last line of the one to the last line of the other,
+    # and the two BLANK separator lines between them belong to neither span.
+    #
+    # So the claim is now made per line instead, and a **blank line is
+    # neutral** — it carries no code, so it cannot carry a feature. Every
+    # non-blank edited line must still fall inside a named span. A hunk that
+    # straddles two spans with real code between them still fails, which the
+    # old form also caught; a hunk that straddles two spans with only
+    # whitespace between them now passes, which the old form wrongly did not.
+    new_lines = (REPO / "quotation.py").read_text(encoding="utf8").splitlines()
+    for hunk in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@",
+                            _diff("-U0", FREEZE_BASE, "--", "quotation.py"),
+                            re.MULTILINE):
+        start = int(hunk.group(1))
+        count = int(hunk.group(2) or 1)
+        if count == 0:            # a pure deletion touches no new-file line
+            continue
+        for ln in range(start, start + count):
+            if not new_lines[ln - 1].strip():
+                continue          # a blank line carries no code
+            inside = any(lo <= ln <= hi for lo, hi in spans.values())
+            assert inside, (
+                f"quotation.py line {ln} was edited, outside every unfrozen "
+                f"function {sorted(spans.items())}: {new_lines[ln - 1]!r}. "
+                f"The 29 August 2026 unfreeze covers view_quotation(); the "
+                f"11 September 2026 one covers _product_catalog_json(), "
+                f"_process_selections() and create_quotation(); the "
+                f"23 September 2026 one covers delete_quotation(). Nothing "
+                f"else in that file is unfrozen.")
+
+
+def test_the_display_name_is_escaped(client):
+    """
+    The chip interpolates a value a user administrator typed. `P.esc` at the
+    interpolation site, per the 27 August 2026 rule in CLAUDE.md — not a
+    response filter, and not left to the browser.
+    """
+    user = auth.find_user("test-owner")
+    original = user["display_name"]
+    user["display_name"] = '<script>alert(1)</script>Bob & Co'
+    try:
+        html = client.get("/").get_data(as_text=True)
+        assert "<script>alert(1)</script>Bob" not in html, (
+            "a display name reached the nav unescaped")
+        assert "&lt;script&gt;" in html and "Bob &amp; Co" in html
+    finally:
+        user["display_name"] = original
+
+
+def test_the_initials_come_from_the_display_name(client):
+    """Two words, two initials — and never an empty circle."""
+    user = auth.find_user("test-owner")
+    original = user["display_name"]
+    try:
+        user["display_name"] = "Rohan Arun Sample"
+        assert '<span class="nu-avatar">RA</span>' in \
+            client.get("/").get_data(as_text=True)
+        user["display_name"] = ""
+        html = client.get("/").get_data(as_text=True)
+        assert '<span class="nu-avatar">' in html, "the avatar vanished"
+    finally:
+        user["display_name"] = original
+
+
+# ── Where it must NOT appear — and the one pinned page where it now must ──
+#
+# ⚠ **REWRITTEN 14 September 2026.** Until the sidebar, `_user_chip()` returned
+#   "" on every endpoint in `PINNED_PAGES`, so that a golden-hashed page never
+#   gained nav markup. The old test, verbatim:
+#
+#       def test_no_chip_on_a_page_a_golden_hashes(url):
+#           with app_module.app.test_request_context(url):
+#               assert chrome._user_chip() == "", (
+#                   f"{url} is hashed by a golden and would have gained nav markup")
+#
+#   Two things ended it. No print route renders `_nav()` at all any more, so
+#   the chip cannot reach a printed document whether or not it is suppressed —
+#   `tests/test_print_golden.py::test_no_print_route_renders_the_nav` holds
+#   that on the rendered page. And the one pinned page that is a FORM,
+#   `/po/create`, now carries the chip like every other screen page: its golden
+#   was re-baselined for the sidebar in the same commit, in the `head` block
+#   alone, and a form without a sign-out control was the cost ABOUT.md §7 said
+#   the coupling was charging.
+
+def test_the_one_pinned_form_carries_the_chip(client):
+    """
+    `/po/create` is hashed by `tests/test_print_golden.py` and is a form, not a
+    document. It renders the shell and the chip like every screen page.
+    """
+    client.get("/boq/")
+    from store import STORE
+    bid = next(b for b, rec in STORE["boqs"].items() if not rec.get("supersedes"))
+    html = client.get(f"/po/create?boq={bid}").get_data(as_text=True)
+    assert '<nav class="rail"' in html
+    assert 'class="nav-user"' in html, "the pinned form has no sign-out control"
+
+
+def test_the_chip_is_empty_with_no_session():
+    """
+    The 404 and 413 handlers render `_nav()` and can be reached before anybody
+    has signed in. A chip with nobody in it is worse than no chip.
+    """
+    import app as app_module
+
+    with app_module.app.test_request_context("/"):
+        assert chrome._user_chip() == ""
+
+
+def test_the_chip_styles_are_not_in_the_block_the_goldens_hash():
+    """
+    The constant separation is the mechanism, so it is asserted rather than
+    trusted. Fold these rules into `BASE_STYLES` and five goldens move for a
+    control `@media print` hides anyway.
+    """
+    assert ".nav-user" not in chrome.BASE_STYLES, (
+        "the chip's styles have been folded into BASE_STYLES — the block five "
+        "print goldens hash")
+    assert ".nav-user" in chrome.USER_CHIP_STYLES
+    assert chrome.USER_CHIP_STYLES.lstrip().startswith("<style>")
+
+
+# ── The route behind the link ──────────────────────────────────────────────
+
+def test_the_link_goes_to_the_confirmation_and_the_post_is_what_signs_out(client):
+    """
+    `POST /logout` stays the real route. The nav links to `GET /logout`, which
+    confirms — the delete-route convention from `9d060ee`, and the reason a
+    prefetcher or a mail scanner unfurling a pasted URL cannot end a session.
+    """
+    html = client.get("/").get_data(as_text=True)
+    assert 'href="/logout"' in html
+    assert 'action="/logout"' not in html, (
+        "a POST form was put in the nav, bypassing the GET confirmation")
+
+    confirm = client.get("/logout")
+    assert confirm.status_code == 200
+    assert "Sign out" in confirm.get_data(as_text=True)
+    with client.session_transaction() as session:
+        assert auth.SESSION_KEY in session, "GET /logout ended the session"
+
+    out = client.post("/logout")
+    assert out.status_code in (302, 303)
+    with client.session_transaction() as session:
+        assert auth.SESSION_KEY not in session, "POST /logout did not sign out"
+
+
+def test_signing_out_actually_closes_the_app_again(client):
+    """
+    The control that makes the test above mean something: after the POST the
+    session is gone and a gated page redirects to `/login`, rather than the
+    cookie merely being rewritten.
+    """
+    assert client.get("/boq/").status_code == 200
+    client.post("/logout")
+
+    response = client.get("/boq/")
+    assert response.status_code in (302, 303)
+    assert "/login" in response.headers.get("Location", "")

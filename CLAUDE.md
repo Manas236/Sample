@@ -1,0 +1,118 @@
+# QMS — white-label product
+
+**Before doing anything in this repo, read [ABOUT.md](ABOUT.md) in full.**
+
+It is the project's context anchor — architecture, per-page instructions, data
+shapes, known gaps, and which files are stale. Do not infer structure from file
+names or from `integration.py` / `product_view_additions.py` (both are dead
+docs; ABOUT.md §8 explains why).
+
+**This repo is the white-label product.** Nothing company-specific ships in
+code: the name, statutory identity, bank, logo, document prefix, sign-in domain
+and public landing page are `/settings` values. The original client deployment
+is fetched as the `upstream` remote (push disabled); comments that cite
+`CLIENT_CHANGES.md` §0 blocks refer to that deployment's change log, which is
+not in this repo.
+
+One document is easy to miss. [INTRODUCTION.md §4](INTRODUCTION.md) holds the
+full document map; this is the one you are most likely to need and least likely
+to find:
+
+- [CLIENT_CHANGES-2.md](CLIENT_CHANGES-2.md) — **Phase 3 scope** (3A / 3B / 3C).
+  Read it before touching users, approvals, attachments, measurement, the
+  merged RA or labour cost. It is a specification, not permission to build.
+
+Fast facts so you don't get it wrong before reading:
+
+- Flask app, **no `/templates` and no `/static`** — all HTML is f-strings passed
+  to `render_template_string()`, all CSS is Python string constants, all images
+  are inlined base64 data URIs.
+- Because HTML lives in f-strings, **literal `{` and `}` in embedded CSS/JS must
+  be doubled** (`{{` / `}}`). This is the most common way to break a page here.
+- `store.STORE` is one shared dict mutated in place; `db.py` persists it by
+  snapshotting and diffing after every request.
+- Seller-side app: we issue the quotation, the customer sends us the PO.
+- **User text is escaped at every site where it reaches HTML** (27 Aug 2026).
+  Use `P.esc` at the interpolation site — never a response filter, never on a
+  money or quantity format, and never on a value a helper already escaped
+  (`quotation._meta()` and `docsheet.sig_block()`'s arguments take pre-escaped
+  values). JSON going into a `<script>` uses `pipeline.json_for_script()`.
+  `render_template_string` is gone from every module; do not reintroduce it.
+  ABOUT.md §9 has the rule, §7.7 has the sinks that are easy to miss.
+- **The employee rate is a DAY rate, not a monthly salary** (30 Aug 2026), and
+  `wage_days_per_month` is deleted. ⚠ **A record carrying `monthly_salary` and
+  `rate_model: "pre_day_rate"` is a closed historical set — NEVER convert one
+  arithmetically.** A monthly figure reread as a day rate is about twenty-six
+  times too large; `employee.day_rate_of()` refuses to answer for a marked
+  record and `attendance.cost_of()` produces no figure at all. `site` on both
+  those records is an **address-book picker**, and an unmatched legacy string is
+  left, marked `unmapped` and reported — never fuzzy-matched. ABOUT.md §3.
+- **The product catalogue is HIDDEN from everybody, an Owner included, and
+  the quotation picker FOLLOWS that switch** (11–12 Sep 2026). The hide is
+  one line — `auth.HIDDEN_BLUEPRINTS = {"product"}` — a toggle, not a
+  deletion: permissions, registry rows and every role's grants are untouched.
+  While hidden, `/quotation/create` is written from the SPEC LIBRARY through
+  the leaf `specpick.py` — **Supply only, no installation leg**; empty the set
+  and it is the product picker, pinned byte for byte by a golden (its picker
+  code is still `1d7725a`'s). `quotation.py` is
+  unfrozen for exactly three functions (`_product_catalog_json`,
+  `_process_selections`, `create_quotation`), which branch on the switch by
+  function-body import and nothing else; `tests/test_nav_user_chip.py` holds
+  that. ABOUT.md §2g and §5 `/quotation`.
+- **The APPROVAL LADDER is SWITCHED OFF in code** (12 Sep 2026) —
+  `approval.LADDER_ON = False`, read through `approval.ladder_on()` and
+  nothing else, no `/settings` control by design. Every approve/reject route
+  is refused for everyone, an Owner included; an undecided document prints
+  and downloads; a decision already taken (APPROVED / REJECTED) is never
+  overturned; every record created while off is stamped
+  `raised_while_approvals_off` at create and is never gated when the ladder
+  returns. ⚠ **The measurement cap still binds** — a saved sheet is the
+  installation ceiling (`measurement.feeds_ceiling()`), and `ra.py`'s
+  grandfather rule was not touched. Built code stays; B6, B7 and C2 stay
+  BUILT. The ladder-proving tests run ON through `conftest.ladder_on`;
+  `tests/test_approvals_off.py` is the OFF state. ABOUT.md §2i and §2j.
+- **NOTHING SEEDS ON A PAGE VIEW, and a fresh checkout is EMPTY** (October
+  2026). Boot writes only the builtin roles and the charge-head list. The
+  fictional demo company — `demo_seed.py`, written through the app's own
+  routes — goes into an EMPTY database with `python tools/seed_demo.py`, which
+  refuses unless `QMS_DEMO_DATA=true` (default OFF), unless persistence is
+  live, and unless the database is empty; it creates one Owner + Director,
+  `admin`, and prints the password once. The tests build their baseline from
+  the same module (`tests/conftest.py`). The spec library is NOT a default
+  any more. ABOUT.md §1 and §7 gap 35.
+- **The suite does NOT read your `.env`** (25 Sep 2026) — `conftest`
+  neutralises `load_dotenv` before `db` is imported, so `python -m pytest` is
+  a usable check on the production box. A test that needs a setting sets it
+  itself, with `monkeypatch`. The application still reads `.env` normally.
+- **Every statutory number series has a settable starting FLOOR**, and the
+  rule and the scan live in the leaf **`series.py`** — not in `settings.py`,
+  because **`boq.py` may not import `settings.py`**. `next = max(existing max
+  in the scope + 1, floor)`; a blank floor is byte-identical to the old
+  behaviour; an FY-reset series' floor is stored **with its financial year**,
+  so Rule 46(b)'s April reset to `0001` still happens. `quotation.py` is
+  frozen (baseline `tests/test_nav_user_chip.FREEZE_BASE`) and its series
+  deliberately has **no** floor. ⚠ **No lock was
+  added** — the minters are still unguarded scan-max-then-plus-one, which is
+  why `--workers 1 --threads 1`. ABOUT.md §7 gap 36.
+- **The app is closed (Phase 3B, 26 Aug 2026).** Every route is gated by
+  `auth.ROUTE_PERMISSIONS`, and **an endpoint missing from that registry is
+  refused, not opened** — so a route you add is unreachable until you register
+  it, and `tests/test_access_control.py` fails until you do. On a fresh
+  database every URL redirects to `/setup`; `python tools/seed_users.py
+  --password "…"` is the same job from a terminal. ABOUT.md §2g is why it is a
+  central registry and not a decorator.
+
+One more document is easy to miss and is the one to reach for before answering
+"who can do what": [docs/ACCESS_MATRIX.md](docs/ACCESS_MATRIX.md) — the 7 roles
+× 84 permissions grid, generated by `tools/dump_access_matrix.py` and never
+hand-edited (its own header line is the figure to trust; this sentence has been
+stale before). **Regenerate it in the same commit as any change to a permission,
+a role or a route classification**; `tests/test_access_matrix_doc.py` fails until
+you do.
+
+When you change architecture, a data shape, or a route — update ABOUT.md in the
+same commit.
+
+Any pass that changes the build state of a Phase 3 item must update
+[PROGRESS.md](PROGRESS.md) in the same commit, header block included.
+PROGRESS.md is regenerated from code, never edited to match a plan.

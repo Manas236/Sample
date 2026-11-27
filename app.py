@@ -1,0 +1,302 @@
+"""
+app.py — The Orchestrator
+=========================
+Entry point for the Quotation Management System.
+Registers all Blueprints and defines global error handling.
+"""
+
+import os                         # the bind address, read at the foot of this file
+import sys                        # stderr for a bind-port complaint
+
+from flask import Flask, redirect, url_for
+import dashboard                  # too_large_page() for the 413 handler
+from dashboard import dashboard_bp
+from extractor import extractor_bp
+from product import product_bp   # Phase 1: product management
+from quotation import quotation_bp  # Phase 2: quotation generation
+from proforma import proforma_bp  # Phase 3: proforma invoice (derived from a quotation)
+from invoice import invoice_bp   # Phase 4: GST tax invoice (derived from a proforma)
+from purchase import purchase_bp  # Buy side: purchase orders. A SEPARATE pipeline —
+                                  # it never links to a proforma or a tax invoice.
+from spec import spec_bp         # Specification library: the vocabulary a BOQ is
+                                 # written in. Clauses with SIZED VARIANTS — not a
+                                 # replacement for product.py, which serves the
+                                 # quotation chain and is untouched.
+from boq import boq_bp           # BOQ: the priced schedule for a project. Head of a
+                                 # SECOND sell-side chain — BOQ -> RA bills — parallel
+                                 # to quotation -> proforma -> tax invoice, not part of it.
+from boqimport import boqimport_bp  # Import BOQ from Excel (29 Sep 2026): upload,
+                                 # preview, then /boq/create PREFILLED. Imports
+                                 # boq.py; boq.py links here with url_for only.
+from ra import ra_bp             # RA bills: progressive claims against a BOQ
+                                  # revision. Headed TAX INVOICE per DOMAIN.md §4.
+from receipt import receipt_bp   # Receipts: money RECEIVED against an RA bill.
+from merged_ra import merged_bp  # CC-2 C3: one issued supply bill + one
+                                 # issued installation bill, stacked onto one
+                                 # sheet under ONE minted tax invoice number.
+                                 # Imports ra.py; ra.py links back with url_for
+                                 # and reads STORE['merged_ras'] directly.
+                                 # Its own collection, never a list on the bill
+                                 # or the BOQ. It imports ra.py; ra.py links
+                                 # back with url_for only.
+from client import client_bp     # Client-wise segregation and party edits
+from po_draft import po_draft_bp # Draft PO from BOQ
+from challan import challan_bp   # Delivery challans: goods leaving the yard
+                                 # against a BOQ. Its own collection, beside
+                                 # the RA bill on the project chain and
+                                 # deliberately not reconciled with it.
+from measurement import measurement_bp  # Measurement sheets from a BOQ (CC-2
+                                 # C2). Its own collection. ra.py imports it
+                                 # for approved_qty_by_line(); it must never
+                                 # import ra.py back.
+from project import project_bp   # Projects: the commercial engagement BOQs
+                                 # are grouped under. A LEAF — it must not
+                                 # import any document module.
+from projectview import projectview_bp # UI for Project Detail
+from charge import charge_bp             # Employee & Misc Charges Ledger
+from employee import employee_bp         # Employee master: details and salary
+from attendance import attendance_bp     # Attendance + site-wise labour cost (C5)
+from approval import approval_bp         # Approval ladder + creator guard (B6/B7)
+from attachment import attachment_bp     # File attachments on a charge / receipt
+                                 # (CC-2 B8). Bottom-of-graph like approval.py:
+                                 # charge.py and receipt.py import it, so it may
+                                 # import neither.
+                                 # (CC-2 C4). A LEAF, and deliberately NOT on
+                                 # the nav or the dashboard — _nav() is on every
+                                 # printed page, so one more entry moves every
+                                 # print golden. Reachable by URL; the link is
+                                 # queued work. Same call charge.py made.
+from address import address_bp   # Standalone address book
+from settings import settings_bp, ensure_default_settings, load_saved, load_logo  # Company identity & bank details
+from landing import landing_bp   # The PUBLIC landing page at /welcome, built
+                                 # from /settings. Imports settings, never auth.
+import auth                      # Identity, roles and the default-deny gate.
+from auth import auth_bp         # Imports nothing that prints, so it may be
+                                 # imported anywhere — see auth.py's header.
+
+import branding as B             # Runtime overrides are pushed onto this module
+import db                        # MySQL persistence (config from .env)
+from store import STORE
+
+# ── App Initialization ────────────────────────────────────────────────────────
+app = Flask(__name__)
+
+# `app.secret_key` is set by `auth.install()` at the foot of this file, from a
+# real key rather than the literal `"qms-demo-secret-2024"` that used to sit
+# here (ABOUT.md §7 gap 8). It has to happen after the blueprints are
+# registered, so it is not done on this line any more.
+
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+# Connect, create the schema if absent, and hydrate STORE from MySQL. When the
+# reloader is active this runs in both the watcher and the worker process;
+# everything involved is idempotent, so that is harmless.
+def _boot_persistence() -> None:
+    live = db.init()
+    if live:
+        n = db.load_into(STORE)
+        print(f"  * {db.status()} - {n} record(s) loaded")
+    else:
+        print(f"  * WARNING: {db.status()}")
+        print("  *          data will be lost on restart. Check .env / MySQL.")
+
+    # The charge heads — a genuine default, never demo data. Seeded here rather
+    # than from a route so the first request already has them. Only ever fills
+    # a gap: a list just loaded out of MySQL is left alone.
+    ensure_default_settings()
+
+    # Company identity and bank details saved on /settings override the defaults
+    # in branding.py. This must run AFTER load_into and after the seeder, and
+    # before the first request renders a letterhead. Idempotent, so the reloader
+    # running it in both processes is harmless. The logo is its own record.
+    B.apply_settings(load_saved())
+    B.apply_logo(load_logo())
+
+
+_boot_persistence()
+
+
+@app.teardown_request
+def _persist(exc):
+    """
+    Mirror STORE back to MySQL after every request.
+
+    Blueprints mutate nested dicts in place, so there is no write to intercept —
+    db.sync() diffs the whole store and writes only what actually changed.
+    teardown_request is used (over after_request) because it runs even when a
+    view raised, so a half-finished mutation is still saved rather than lost.
+    """
+    db.sync(STORE)
+
+
+# ── Blueprint Registration ────────────────────────────────────────────────────
+# Each Blueprint encapsulates a self-contained feature module.
+# Registering here keeps app.py thin — it only wires, never implements.
+app.register_blueprint(dashboard_bp)           # Mounted at /
+app.register_blueprint(extractor_bp)           # Mounted at /extractor
+app.register_blueprint(product_bp)            # Mounted at /product
+app.register_blueprint(quotation_bp)          # Mounted at /quotation
+app.register_blueprint(proforma_bp)           # Mounted at /proforma
+app.register_blueprint(invoice_bp)            # Mounted at /invoice
+app.register_blueprint(purchase_bp)           # Mounted at /purchase  (buy side)
+app.register_blueprint(spec_bp)               # Mounted at /spec
+app.register_blueprint(boq_bp)                # Mounted at /boq
+app.register_blueprint(boqimport_bp)          # Mounted at /boq/import — REQUIRED
+                                              # by /boq/create, which builds
+                                              # url_for("boqimport.upload") for
+                                              # its Import from Excel button.
+app.register_blueprint(ra_bp)                 # Mounted at /ra   — REQUIRED by
+                                              # /boq/view, which builds
+                                              # url_for("ra.view_ra") for every
+                                              # RA bill against the BOQ and
+                                              # 500s without this.
+app.register_blueprint(receipt_bp)            # Mounted at /receipt — REQUIRED by
+                                              # /ra/view, which builds
+                                              # url_for("receipt.new_receipt")
+                                              # on every bill and 500s without it.
+app.register_blueprint(merged_bp)             # Mounted at /merged — CC-2 C3.
+                                              #   Must come after ra_bp: it
+                                              #   imports ra.py for the chain,
+                                              #   the status predicates and the
+                                              #   outstanding arithmetic.
+app.register_blueprint(po_draft_bp)           # Mounted at /po (Draft PO from BOQ)
+app.register_blueprint(challan_bp)            # Mounted at /dc — REQUIRED by
+                                              # /boq/view, which builds
+                                              # url_for("challan.create_dc")
+                                              # in its action bar.
+app.register_blueprint(measurement_bp)        # Mounted at /measurement —
+                                              # REQUIRED by /boq/view, which
+                                              # builds
+                                              # url_for("measurement.create_ms")
+                                              # in its action bar, and by
+                                              # /ra/create's C1 refusal, which
+                                              # links to it.
+app.register_blueprint(client_bp)             # Mounted at /client
+app.register_blueprint(project_bp)            # Mounted at /projects — LEAF, must
+                                              # not import any document module.
+app.register_blueprint(projectview_bp)        # Project UI detail page
+app.register_blueprint(charge_bp)             # Mounted at /charge — LEAF, must come after dashboard
+app.register_blueprint(employee_bp)           # Mounted at /employee — LEAF, same rule
+app.register_blueprint(attendance_bp)         # Mounted at /attendance — imports
+                                              #   employee_bp's module for the
+                                              #   master and settings for the OT
+                                              #   multiplier; nothing imports it
+app.register_blueprint(approval_bp)           # Mounted at /approval — B6's ladder.
+                                              #   Eight endpoints minted from
+                                              #   approval.DOCUMENTS; imports no
+                                              #   document module, so any of them
+                                              #   may import it back
+app.register_blueprint(attachment_bp)         # Mounted at /attachment — CC-2 B8.
+                                              #   The ONLY route in this app that
+                                              #   returns file bytes. There is no
+                                              #   /static and this is not one: the
+                                              #   store is outside the tree and
+                                              #   every read passes auth._gate()
+                                              #   under the PARENT record's own
+                                              #   view permission.
+app.register_blueprint(address_bp)            # Mounted at /address
+app.register_blueprint(settings_bp)           # Mounted at /settings
+app.register_blueprint(landing_bp)            # Mounted at /welcome — PUBLIC
+app.register_blueprint(auth_bp)               # Mounted at / — /login, /setup,
+                                              # /account, /users, /roles.
+
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+# The real signing key, the 12-hour session lifetime, and the builtin roles.
+# After blueprint registration because it seeds against a STORE that
+# `_boot_persistence()` has already hydrated.
+#
+# This does NOT gate anything on its own. `auth.enforce(app)` below is the line
+# that closes the app; the two are separate so that turning access control off
+# again is one revert rather than an excavation.
+auth.install(app)
+
+# ⚠ **This is the line that closes the application.** Every endpoint not
+# classified in `auth.ROUTE_PERMISSIONS` is refused from here on, including to
+# an Owner — absence is the safe answer, so a route added later fails closed
+# rather than shipping open.
+#
+# Reverting the commit that added this line restores open access without losing
+# users, roles or the pages that manage them. That is why it is one line on its
+# own rather than a flag: a flag that defaults to off never comes on.
+auth.enforce(app)
+
+
+# ── Global Error Handling ─────────────────────────────────────────────────────
+# Catches any unmatched route and silently redirects to the dashboard.
+# This ensures the demo never surfaces a raw 404 page to stakeholders.
+@app.errorhandler(404)
+def page_not_found(error):
+    """Redirect unknown routes to the main dashboard index."""
+    return redirect(url_for("dashboard.index")), 302
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    """Redirect server errors to dashboard; log in production instead."""
+    return redirect(url_for("dashboard.index")), 302
+
+
+@app.errorhandler(413)
+def payload_too_large(error):
+    """
+    A POST past MAX_FORM_MEMORY_SIZE (500,000 bytes, Flask's default).
+
+    Deliberately NOT a redirect like the two above. A 404 is a mistyped URL and
+    nobody's work; a 413 is a form somebody spent an afternoon filling in, and
+    bouncing them to the dashboard would look exactly like the app discarding it
+    without comment. Werkzeug rejects the body before the form is parsed, so
+    there is genuinely nothing left to re-render — the page says so, and points
+    at the Back button, which may still hold it.
+
+    This is a **backstop**, not the defence. The line cap in
+    `boq._clean_lines()` is what keeps a real BOQ from ever reaching it; this
+    catches the paths that bypass the form, and the case of 600 legal lines that
+    happen to serialise past the limit.
+
+    The status stays 413 — a 302 would tell the browser and the logs that the
+    request succeeded.
+    """
+    return dashboard.too_large_page(), 413
+
+
+# ── Bind address ──────────────────────────────────────────────────────────────
+# Deployment-varying, so read from the environment with the local-dev values as
+# the fallback (9 September 2026). Two names each, the same two-step
+# `auth.resolve_secret_key()` uses and for the same reason: `QMS_*` is
+# this application's own namespace, and the bare name is what a host is likely
+# to set already.
+#
+# ⚠ **The default host is 127.0.0.1 and not 0.0.0.0.** `app.run()` below is the
+#   Werkzeug development server, which must never be the thing listening on a
+#   public interface — `wsgi.py` is the production entry point. Binding the dev
+#   server to every interface by default would put a debug console on the LAN.
+DEV_HOST = os.getenv("QMS_HOST") or os.getenv("HOST") or "127.0.0.1"
+DEV_PORT_RAW = os.getenv("QMS_PORT") or os.getenv("PORT") or "5000"
+
+
+def _dev_port(raw: str) -> int:
+    """The bind port, or 5000 with a named complaint — never a traceback."""
+    try:
+        port = int(str(raw).strip())
+    except (TypeError, ValueError):
+        print(f"  * WARNING: QMS_PORT={raw!r} is not a number - using 5000.",
+              file=sys.stderr, flush=True)
+        return 5000
+    if not (1 <= port <= 65535):
+        print(f"  * WARNING: QMS_PORT={raw!r} is out of range - using 5000.",
+              file=sys.stderr, flush=True)
+        return 5000
+    return port
+
+
+# ── Dev Server ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    # debug=True enables auto-reload; NEVER ship this flag to production.
+    # `wsgi.py` is the entry point that does not set it — and that refuses to
+    # run under more than one worker, because STORE is this process's RAM.
+    # reloader_type="stat" avoids the watchdog reloader, which recursively
+    # watches every sys.path dir (incl. site-packages) and reload-storms when
+    # antivirus/indexers touch file attributes there.
+    app.run(debug=True, host=DEV_HOST, port=_dev_port(DEV_PORT_RAW),
+            reloader_type="stat")
