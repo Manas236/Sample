@@ -1169,7 +1169,12 @@ def test_only_the_demo_fill_reads_the_seed():
     """
     readers = sorted(m.stem for m in REPO.glob("*.py")
                      if m.stem != "demo_seed" and "demo_seed" in imports_of(m.stem))
-    assert readers == ["boq"], readers
+    # DEMO BRANCH: `solar_seed.py` is a seed, not an application module — it
+    # reuses `demo_seed`'s form driver. Nothing in the app imports it either.
+    assert readers == ["boq", "solar_seed"], readers
+    solar_readers = sorted(m.stem for m in REPO.glob("*.py")
+                           if m.stem != "solar_seed" and "solar_seed" in imports_of(m.stem))
+    assert solar_readers == [], solar_readers
     assert "demo_seed" not in imports_of("boq", top_level_only=True), (
         "boq.py reads the seed inside _demo_form_payload() only")
 
