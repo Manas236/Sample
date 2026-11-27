@@ -19,7 +19,7 @@ Branches pushed to Sample: `main` and `demo/solar-epc`, nothing else.
 | Sample `main` readable | It did not exist when the brief first ran: Sample was **empty**. Stopped and reported. After approval, `main` was created as one root commit, **`161ab55`**, a client-scrubbed snapshot (PROVENANCE.md), and pushed with `git push origin sample-snapshot:main`. Afterwards `ls-remote`: one branch, one commit, no tags. |
 | Demo_Works `antigravity-dev` readable | Yes. Fetched from the remote; tip **`e1ac14f`** (the local copy had been `383135b`, the fork point). |
 | Sample `main` SHA at baseline | `161ab55` |
-| Client-name grep on `main` | The first grep of the pre-snapshot tree found **1 hit** (`newage`, an example brand in a comment in `sheetimport.py`). Fixed in the snapshot. Snapshot tree: **0 hits** for all 22 terms; the three `.xlsx` files were opened and scanned separately (fictional "Demo Projects" workbooks, 0 hits). Also confirmed absent from the snapshot: `backups/`, `.env`, `.claude/`, `.gemini/`, any client `.xlsx` / `.pdf` / `.docx`. |
+| Client-name grep on `main` | The first grep of the pre-snapshot tree found **1 hit** (one of the listed terms, used as an example brand in a comment in `sheetimport.py`). Fixed in the snapshot. Snapshot tree: **0 hits** for all 22 terms; the three `.xlsx` files were opened and scanned separately (fictional "Demo Projects" workbooks, 0 hits). Also confirmed absent from the snapshot: `backups/`, `.env`, `.claude/`, `.gemini/`, any client `.xlsx` / `.pdf` / `.docx`. |
 | MySQL | MySQL **8.0.39** already installed and running (Windows service `MYSQL80`); nothing installed. |
 | Baseline suite | **3,665 passed, 4 skipped, 0 failed** on `161ab55`. |
 
