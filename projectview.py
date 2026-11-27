@@ -36,12 +36,18 @@ the section existing at all; its **sixth** block is the authority for the two
 groups. ⚠ **Neither is CC-2 scope** and **C6 stays BLOCKED** on Open question 4:
 attributing a day is not costing a project.
 
-Each panel shows the documents' OWN values and adds that one column up. What
-this page must never show is a figure that only exists by combining two panels
-— no revenue total, no cost total, no margin, no profit, no net, no balance.
-The page reads what the sell side billed and what the buy side committed side
-by side; it does not do the subtraction, because the moment it does, the
-project page becomes a P&L that nobody signed off on.
+Each panel shows the documents' OWN values and adds that one column up. No
+panel combines two panels, and THIS MODULE computes no cross-panel figure:
+no revenue total, no cost total, no margin, no profit, no net, no balance
+is worked out here.
+
+⚠ **27 November 2026 — the product owner reversed C6's block** (PROGRESS.md
+C6, ABOUT.md §2o): the page now carries a **Profit & Loss** panel. Every figure
+in it is computed by the leaf `pnl.py` and rendered verbatim, the same way the
+Site Labour panel renders `attendance.py`'s answers — so the subtraction has
+one home, and it is not this file. Planned (BOQ base rates only) and actual
+(orders, expenses and wages only) are compared, never added, which is how the
+labour question C6 waited on is answered: labour is counted once in each.
 """
 
 from flask import Blueprint, redirect, request, url_for
@@ -49,6 +55,7 @@ import attendance as AT
 import auth
 import branding as B
 import pipeline as P
+import pnl as PNL   # the project P&L, planned vs actual (27 Nov 2026)
 import project as PJ
 import settings as S
 from store import STORE
@@ -503,7 +510,12 @@ def view_project(id: str):
     
     boq_html = ""
     boq_vals = []
-    for boq in attached_boqs:
+    # LATEST REVISION ONLY (27 November 2026, FEATURE_GAP.md row 7): a
+    # superseded revision is listed by reference under the table, never as a
+    # row, so its value is not stacked onto the revision that replaced it.
+    _sup = {str(b.get("supersedes") or "") for b in STORE.get("boqs", {}).values()}
+    old_revs = [b for b in attached_boqs if b.get("id") in _sup]
+    for boq in [b for b in attached_boqs if b.get("id") not in _sup]:
         # A BOQ stores its trio at §4.3; `subtotal` is the one the sheet prints.
         val = _total_of(boq, "subtotal")
         boq_vals.append(val)
@@ -518,6 +530,12 @@ def view_project(id: str):
         """
     if attached_boqs:
         boq_html += _total_row(4, _sum_cell(boq_vals))
+        if old_revs:
+            boq_html += ('<tr><td colspan="5" style="color:var(--muted);font-size:.82rem;">'
+                         'Superseded, not counted: ' + ", ".join(
+                             f'<a href="{url_for("boq.view_boq", id=b.get("id"))}">'
+                             f'{P.esc(b.get("ref"))}</a> (rev {int(b.get("rev_no") or 0)})'
+                             for b in old_revs) + '</td></tr>')
     else:
         boq_html = '<tr><td colspan="5" style="color:var(--muted);">No schedules attached.</td></tr>'
 
@@ -704,6 +722,35 @@ def view_project(id: str):
 
     labour_html = _site_labour(proj)
 
+    # ── The Profit & Loss panel and the RA bills (27 November 2026) ─────────
+    # Every figure is `pnl.figures()`'s: this module renders it and computes
+    # none of it. Site labour reaches it only for a role that may see wages
+    # (B4, the same wall `_site_labour()` holds); otherwise None, and the
+    # panel says the actual figures exclude labour.
+    labour_cost = (AT.labour_cost_for_project(id, S.ot_multiplier())
+                   if auth.has_perm("attendance.view") else None)
+    pnl_html = PNL.panel_html(PNL.figures(id, labour=labour_cost))
+
+    chain_ids = {b.get("id") for b in attached_boqs}
+    bills = sorted((r for r in STORE.get("ra_bills", {}).values()
+                    if r.get("boq_id") in chain_ids),
+                   key=lambda r: (str(r.get("date") or ""), int(r.get("ra_no") or 0)))
+    paid_by_bill = {}
+    for rc in STORE.get("receipts", {}).values():
+        k = rc.get("ra_id")
+        paid_by_bill[k] = paid_by_bill.get(k, 0.0) + float(rc.get("amount") or 0) + float(rc.get("write_off") or 0)
+    ra_rows = "".join(f'''
+        <tr>
+          <td><a href="{url_for('ra.view_ra', id=r.get('id'))}"><b>{P.esc(r.get('ref'))}</b></a></td>
+          <td>RA{int(r.get('ra_no') or 0)} &middot; {P.esc(r.get('leg'))}</td>
+          <td>{P.esc(r.get('date'))}</td>
+          <td>{P.esc(r.get('status'))}</td>
+          <td class="num">{_amt(r.get('claim_subtotal'))}</td>
+          <td class="num">{_amt(r.get('grand_total'))}</td>
+          <td class="num">{_amt(paid_by_bill.get(r.get('id'), 0.0))}</td>
+        </tr>''' for r in bills) or ('<tr><td colspan="7" style="color:var(--muted);">'
+                                    'No RA bills on this project yet.</td></tr>')
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -713,6 +760,7 @@ def view_project(id: str):
   {B.HEAD_ICON}
   {BASE_STYLES}
   {QUOTATION_STYLES}
+  {PNL.PNL_CSS}
   <style>{AT.MARKING_CELL_CSS}
     .proj-meta {{ display:flex; gap:2rem; flex-wrap:wrap; margin-bottom:2rem; padding:1.25rem; background:#fff; border:1px solid var(--border); border-radius:8px; }}
     .pm-item {{ display:flex; flex-direction:column; gap:0.25rem; }}
@@ -813,6 +861,22 @@ def view_project(id: str):
         <span class="pm-lbl">Notes</span>
         <span class="pm-val">{P.esc(proj.get('notes')) or '—'}</span>
       </div>
+    </div>
+
+    <!-- Profit & Loss (pnl.py) -->
+    <div class="panel">
+      <div class="panel-head"><h2>Profit &amp; Loss</h2></div>
+      {pnl_html}
+    </div>
+
+    <!-- RA bills -->
+    <div class="panel">
+      <div class="panel-head"><h2>Running Account Bills</h2></div>
+      <table class="data">
+        <thead><tr><th>RA bill</th><th>No. &middot; leg</th><th>Date</th><th>Status</th>
+          <th class="num">Taxable</th><th class="num">Total incl. GST</th><th class="num">Received</th></tr></thead>
+        <tbody>{ra_rows}</tbody>
+      </table>
     </div>
 
     <!-- BOQs Panel -->

@@ -580,6 +580,22 @@ def markings_for_project(project_id) -> list:
                   reverse=True)
 
 
+def labour_cost_for_project(project_id, multiplier) -> float:
+    """
+    The wages of every marking booked TO one project — day wage plus overtime,
+    through `cost_of()`, so the arithmetic never leaves this module
+    (27 November 2026, for `pnl.py`'s actual cost). A marking `cost_of()`
+    REFUSES (made under the old monthly model) adds nothing rather than a
+    guessed figure; its money is not knowable, and nothing here pretends.
+    """
+    total = 0.0
+    for r in markings_for_project(project_id):
+        c = cost_of(r, multiplier)
+        if not c.get("refused") and c.get("total") is not None:
+            total += float(c["total"])
+    return round(total, 2)
+
+
 def unattributed_at_site(address_id) -> list:
     """
     Markings booked at one site that name **no project** — the legacy rows.

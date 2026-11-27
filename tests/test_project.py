@@ -170,17 +170,25 @@ def _visible_text(html: str) -> str:
     return re.sub(r"(?s)<[^>]+>", " ", html)
 
 
-def test_no_profit_margin_or_net_on_project_view(client):
+def test_only_the_pnl_panel_shows_profit_margin_or_net(client):
     """
-    The project page may show what each document is worth. It may NOT show any
-    figure that only exists by combining two panels.
+    The project page may show what each document is worth, and no PANEL may
+    show a figure that only exists by combining two panels.
 
-    This test used to assert that no rupee symbol appeared anywhere, which is
-    no longer the rule — the rule is that the page performs no subtraction, so
-    that nothing on it can be read as a margin.
+    ⚠ 27 November 2026 — the product owner reversed C6's block: the page has a
+    Profit & Loss panel, every figure of which is `pnl.py`'s (PROGRESS.md C6).
+    This test used to forbid the words on the whole page; it now holds them to
+    that one panel, holds the panel to `pnl.figures()`, and still runs the old
+    cross-panel check on everything else.
     """
+    import pnl as PNL
     _seed_priced_project()
-    html = client.get("/projects/view/p1").get_data(as_text=True)
+    full = client.get("/projects/view/p1").get_data(as_text=True)
+    start, end = full.index("<!-- Profit & Loss (pnl.py) -->"), full.index("<!-- RA bills -->")
+    panel, html = full[start:end], full[:start] + full[end:]
+    assert "Profit &amp; Loss" in panel and "Planned margin" in panel
+    fig = PNL.figures("p1")
+    assert PNL.money(fig["contract"]) in panel and PNL.money(fig["outstanding"]) in panel
     text = _visible_text(html)
 
     for word in ("profit", "margin", "net"):
@@ -206,9 +214,11 @@ def test_each_panel_shows_its_documents_value_and_a_total(client):
     """Every panel carries its own value column and adds that column up."""
     _seed_priced_project()
     # A second BOQ so the BOQ panel's total is a real sum, not one row echoed.
+    # An INDEPENDENT second schedule (27 Nov 2026): a revision would replace
+    # b1 in the panel rather than add to it — latest revision only.
     STORE["boqs"]["b2"] = {
         "id": "b2", "ref": "DP/BOQ/26-27/0008", "date": "2026-06-01",
-        "rev_no": 1, "supersedes": "b1", "account_name": "Lakeside Technologies",
+        "rev_no": 0, "supersedes": "", "account_name": "Lakeside Technologies",
         "project_id": "p1", "subtotal": 65433.0,
     }
 

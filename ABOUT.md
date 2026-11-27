@@ -2063,6 +2063,40 @@ label) and was re-baselined with a `# was …` line; the draft-PO print golden,
 the BOQ line-picker form and the OFF-state quotation form moved for the same
 label and were re-baselined the same way.
 
+
+### 2o. `pnl.py` — the project Profit & Loss, planned vs actual (27 November 2026)
+
+FEATURE_GAP.md row 7, a lean reimplementation; **the product owner reversed
+C6's block** (PROGRESS.md C6). A leaf (`store` + `pipeline`), derived on every
+view, nothing stored. `projectview.py` renders `pnl.panel_html(pnl.figures(id,
+labour=…))` verbatim and computes no cross-panel figure itself.
+
+- **Planned** — the CURRENT revision of each BOQ chain on the project (a
+  superseded revision is never counted): contract from the lines' amounts,
+  planned cost from qty × each track's base rate (a track with no base rate
+  counts its selling rate).
+- **Actual** — billed = issued RA bills' `claim_subtotal` (drafts counted
+  separately, cancelled never), against committed = purchase orders not
+  Cancelled (`taxable_value`), expenses (`taxable_amount`) and site labour from
+  `attendance.labour_cost_for_project()` — a new accessor, so wage arithmetic
+  stays in `attendance.py`.
+- **The labour question** C6 waited on: planned holds the installation base
+  rate, actual holds wages, and the two are compared, never added.
+- **B4.** A role without `attendance.view` gets `labour=None`: the actual
+  figures exclude labour and the panel says so, exactly as the Site Labour
+  panel withholds its rows.
+- **Still owed** = issued bills' `grand_total` − receipts (amount + write-off).
+- **Drawn** as five tiles, an inline-SVG cost-split donut and three progress
+  bars (billed / contract, received / billed, cost / planned cost). No script.
+- **The project page also gained** a *Running Account Bills* table (each
+  bill's taxable, total and received), and its BOQ panel now lists the
+  **latest revision only**; superseded revisions are named under the table and
+  not added into its total. The `project page` golden moved (`head` + `main`)
+  and was re-baselined with a `# was …` line.
+- Not ported from the client line: hand-attaching loose documents (projtag),
+  the waterfall and spider charts, labour estimate-then-actual from payslips,
+  and its coverage / unattributed-cost rules.
+
 ---
 
 ## 3. Data model
