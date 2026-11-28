@@ -2727,6 +2727,8 @@ def print_boq(id: str):
     No `_nav()` and no operations panel — the `.no-print` bar is the only screen
     furniture, exactly as `ra.print_ra()` does it one chain over.
     """
+    from print_styles import PRINT_BASE_STYLES, PRINT_QUOTATION_STYLES
+
     boq = STORE["boqs"].get(id)
     if not boq:
         return redirect(url_for("boq.list_boqs", msg="BOQ not found.", type="error"))
@@ -2745,7 +2747,7 @@ def print_boq(id: str):
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(str(boq.get('ref') or '') + " BOQ")}</title>
   {B.HEAD_ICON}
-  {BASE_STYLES}{VIEW_DOC_STYLES}{QUOTATION_STYLES}{P.PIPELINE_STYLES}{BOQ_STYLES}{BOQ_DOC_STYLES}{cover_css}
+  {PRINT_BASE_STYLES}{VIEW_DOC_STYLES}{PRINT_QUOTATION_STYLES}{P.PIPELINE_STYLES}{BOQ_STYLES}{BOQ_DOC_STYLES}{cover_css}
   <style>
     @media print {{ .no-print {{ display:none !important; }} }}
   </style>

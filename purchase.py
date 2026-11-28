@@ -4200,7 +4200,7 @@ def view_purchase(id: str):
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(str(po.get('ref')) + " Purchase Order")}</title>
   {B.HEAD_ICON}
-  {DS.SHEET_STYLES}{PURCHASE_STYLES}
+  {DS.PRINT_SHEET_STYLES}{PURCHASE_STYLES}
 </head>
 <body>{approval.print_block("purchase", po)}
 <main>

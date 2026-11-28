@@ -1011,6 +1011,8 @@ def view_proforma(id: str):
     that a quotation does not: the not-a-tax-invoice declaration, the amount
     actually payable now, and the bank account to pay it into.
     """
+    from print_styles import PRINT_BASE_STYLES, PRINT_QUOTATION_STYLES
+
     pi = STORE["proformas"].get(id)
     if not pi:
         return redirect(url_for("proforma.list_proformas",
@@ -1254,7 +1256,7 @@ def view_proforma(id: str):
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(str(pi.get('ref')) + " Proforma Invoice")}</title>
   {B.HEAD_ICON}
-  {BASE_STYLES}{VIEW_DOC_STYLES}{QUOTATION_STYLES}{P.PIPELINE_STYLES}{PROFORMA_STYLES}
+  {PRINT_BASE_STYLES}{VIEW_DOC_STYLES}{PRINT_QUOTATION_STYLES}{P.PIPELINE_STYLES}{PROFORMA_STYLES}
 </head>
 <body>
 <main>

@@ -1137,7 +1137,7 @@ def print_dc(id: str):
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(str(dc.get('ref')))}</title>
   {B.HEAD_ICON}
-  {DS.SHEET_STYLES}{DC_DOC_STYLES}{DS.COPY_STYLES}
+  {DS.PRINT_SHEET_STYLES}{DC_DOC_STYLES}{DS.COPY_STYLES}
 </head>
 <body>
 <div class="screen-acts no-print">

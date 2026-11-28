@@ -2525,6 +2525,8 @@ def update_quotation(id: str):
 
 @quotation_bp.route("/view/<id>")
 def view_quotation(id: str):
+    from print_styles import PRINT_BASE_STYLES, PRINT_QUOTATION_STYLES
+
     q = STORE["quotations"].get(id)
     if not q:
         return redirect(url_for("quotation.list_quotations", msg="Quotation not found.", type="error"))
@@ -2937,7 +2939,7 @@ def view_quotation(id: str):
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(q['ref'] + " Quotation")}</title>
   {B.HEAD_ICON}
-  {BASE_STYLES}{VIEW_DOC_STYLES}{QUOTATION_STYLES}{P.PIPELINE_STYLES}
+  {PRINT_BASE_STYLES}{VIEW_DOC_STYLES}{PRINT_QUOTATION_STYLES}{P.PIPELINE_STYLES}
 </head>
 <body>
 {_nav()}

@@ -65,6 +65,7 @@ builder, that file goes red and names the block — which is the point of it.
 """
 
 import branding as B
+from print_styles import PRINT_BASE_STYLES, PRINT_QUOTATION_STYLES
 
 # The A4 sheet and the document's own formatters. `_meta` is re-exported so a
 # consumer needs one import rather than two.
@@ -96,6 +97,9 @@ import pipeline as P
 # font, type size or border weight — that restraint is why the documents look
 # related, and it is stated in ABOUT.md §5 for each of them in turn.
 SHEET_STYLES = f"{BASE_STYLES}{VIEW_DOC_STYLES}{QUOTATION_STYLES}{P.PIPELINE_STYLES}"
+PRINT_SHEET_STYLES = (
+    f"{PRINT_BASE_STYLES}{VIEW_DOC_STYLES}{PRINT_QUOTATION_STYLES}{P.PIPELINE_STYLES}"
+)
 
 # Rules for the blocks this module introduces to a sheet that did not carry
 # them before. Scoped inside `.quotation-doc` exactly as `PROFORMA_STYLES` is,

@@ -5075,7 +5075,7 @@ def print_ra(id: str):
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(f"TAX INVOICE — RA{bill.get('ra_no')}")}</title>
   {B.HEAD_ICON}
-  {DS.SHEET_STYLES}{DS.DOCSHEET_STYLES}{RA_DOC_STYLES}{DS.COPY_STYLES}
+  {DS.PRINT_SHEET_STYLES}{DS.DOCSHEET_STYLES}{RA_DOC_STYLES}{DS.COPY_STYLES}
 </head>
 <body>
 <main>

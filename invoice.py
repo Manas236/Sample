@@ -1349,7 +1349,7 @@ def view_invoice(id: str):
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(str(ti.get('ref')) + " Tax Invoice")}</title>
   {B.HEAD_ICON}
-  {DS.SHEET_STYLES}{PROFORMA_STYLES}{INVOICE_STYLES}{DS.COPY_STYLES}
+  {DS.PRINT_SHEET_STYLES}{PROFORMA_STYLES}{INVOICE_STYLES}{DS.COPY_STYLES}
 </head>
 <body>{approval.print_block("invoice", ti)}
 <main>

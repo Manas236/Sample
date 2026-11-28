@@ -979,7 +979,7 @@ def print_merged(id: str):
 <head><meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>{B.page_title(str(doc.get('tax_invoice_ref') or 'Merged'))}</title>{B.HEAD_ICON}
-{DS.SHEET_STYLES}{DS.DOCSHEET_STYLES}{RA.RA_DOC_STYLES}
+{DS.PRINT_SHEET_STYLES}{DS.DOCSHEET_STYLES}{RA.RA_DOC_STYLES}
 <style>
 {DS.BAND_CSS}</style>{DS.COPY_STYLES}
 {approval.print_block("merged_ra", doc)}</head>

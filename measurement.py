@@ -2408,7 +2408,7 @@ def print_ms(id: str):
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>{B.page_title(str(ms.get('ref')))}</title>
   {B.HEAD_ICON}
-  {DS.SHEET_STYLES}{MS_DOC_STYLES}{_joint_head(ms)}
+  {DS.PRINT_SHEET_STYLES}{MS_DOC_STYLES}{_joint_head(ms)}
 </head>
 <body>
 <div class="screen-acts no-print">
