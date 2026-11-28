@@ -18,3 +18,17 @@ Give site staff stacked summaries and horizontally scrollable line items on narr
 - Print isolation changes print_styles.py, docsheet.py, invoice.py, proforma.py, purchase.py, po_draft.py, challan.py, ra.py, merged_ra.py, boq.py, measurement.py and quotation.py. Neither source stylesheet nor any golden was edited. No seed changes or demo-data commits. The print isolation unit can be cherry-picked onto main.
 - Screen implementation is blocked by the instruction to keep every golden unchanged. tests/test_page_golden.py::test_the_screen_page_is_unchanged hashes the complete HTML, including all inline CSS, on the dashboard, project, registers and settings. The dashboard explicitly pins 91,294 characters and digest 19c0765acc302822. A stylesheet or markup edit in the normal rendering path changes that hash. No test-only rendering path or weakened assertions were introduced.
 - No demo click path changed. P0 and P1 screen work, paired screenshots, visual print comparison, repeat seed and final role sweep remain pending.
+
+## Verified checkpoint
+
+Print isolation commit `ade4b47` passed the full suite with 3,729 passed, 6 skipped, 0 failed in 133.98 seconds. The two frozen strings were additionally compared directly against their original runtime values. An implementation error in a preliminary uncommitted edit moved a return; it was corrected before this commit.
+
+The accompanying evidence commit changes this report and the eleven baseline PNGs only. The source for every screenshot was the fallback commit checked out at detached HEAD, with the same seeded database as Step 0. Chromium 158, 1440 × 1000 CSS pixels, browser zoom 100%, external requests blocked. The signed-in dashboard is at / and the public landing page at /welcome/. For the DC form the current Project 1 BOQ was selected. The public screens were captured signed out; the other nine were captured as Owner.
+
+Baseline screenshot directory: docs/ui-before/. Files: login.png, landing.png, dashboard.png, project-1.png, boq-register.png, boq-view.png, ra-view.png, po-list.png, dc-create.png, receipts.png, settings-branding.png. This evidence commit is demo-specific documentation, separate from the cherry-pickable print code. No AFTER images exist because no screen restyle was applied.
+
+The GitHub-side SHA for the tested print-isolation tree is `3b85029148a7e23c4ebb049dbabede3aa449653d`. Local Git lacked push credentials. Publishing through the GitHub connection creates new commit metadata; the verified tree SHA is `37415817f5d112ce78c278ac66bb3e49ed3d2a06`.
+
+Two further seed runs each reported the same counts in all 18 collections as Step 0. For all 21 seeded printable documents, Chromium opened both the fallback and UI branch versions as Owner. The complete response bodies and full-page PNGs under print media compared byte-identical for each pair. Coverage: 3 BOQs, 4 RA bills, 4 challans, 2 product inquiries, 1 measurement sheet, 2 quotations, 5 purchase orders including the work order. The golden suite covers additional unseeded print types. This was a browser print-media comparison, not a PDF pagination comparison.
+
+The seven-role HTTP sweep was started, but automatic approval review rejected an outbound request to services.gst.gov.in triggered during the run. The final role counts were unavailable, so no zero-error sweep is claimed. The captured BEFORE screenshots and comparisons above used only local HTTP.
